@@ -1,0 +1,26 @@
+# Artefactos de asistentes de IA y documentación interna (no se suben al servidor)
+.claude/
+.atl/
+.codegraph/
+docs/
+odd/
+.pr/
+
+# Secretos y entorno
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+dist/
+
+# Sistema operativo / editores
+.DS_Store
+.idea/
+.vscode/
