@@ -8,6 +8,7 @@ def _state(*, retrieval_requested: bool) -> AgentState:
         "retrieval_requested": retrieval_requested,
         "route": None,
         "documents": [],
+        "messages": [],
         "answer": None,
         "error": None,
     }

@@ -2,6 +2,8 @@
 
 - Todos los secretos viven en variables de entorno (`.env`, ignorado por git) y se leen como
   `SecretStr`, de modo que no aparecen en `repr()` ni en logs. `.env.example` es la plantilla.
+- Gemini reutiliza `GEMINI_API_KEY` mediante `IntegrationsSettings`; el cliente guarda únicamente
+  metadatos seguros de uso (modelo, tokens y latencia) en los mensajes del agente.
 - `INTEGRATIONS_SANDBOX=true` por defecto. Meta y WhatsApp no tienen un host de pruebas
   separado: el sandbox son **apps en modo desarrollo, usuarios de prueba y el número de prueba
   de WhatsApp Cloud**. X no ofrece sandbox: usa un proyecto de desarrollo propio.
