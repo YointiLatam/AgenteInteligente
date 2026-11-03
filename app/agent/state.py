@@ -1,6 +1,6 @@
 """Tipos compartidos por los nodos del agente."""
 
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 
 class RetrievedDocument(TypedDict):
@@ -11,6 +11,14 @@ class RetrievedDocument(TypedDict):
     score: float
 
 
+class AgentMessage(TypedDict):
+    """Mensaje generado por el flujo y sus metadatos de proveedor seguros."""
+
+    role: Literal["router", "assistant"]
+    content: str
+    raw_payload: dict[str, Any]
+
+
 class AgentState(TypedDict):
     """Estado mínimo compartido por el flujo inicial del agente."""
 
@@ -18,5 +26,6 @@ class AgentState(TypedDict):
     retrieval_requested: bool
     route: Literal["rag", "reasoning"] | None
     documents: list[RetrievedDocument]
+    messages: list[AgentMessage]
     answer: str | None
     error: str | None
