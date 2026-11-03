@@ -8,6 +8,7 @@ def _state(**updates) -> AgentState:
         "retrieval_requested": False,
         "route": "reasoning",
         "documents": [],
+        "messages": [],
         "answer": None,
         "error": None,
     }
