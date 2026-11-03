@@ -17,6 +17,7 @@ class IntegrationsSettings(BaseSettings):
     whatsapp_access_token: SecretStr | None = None
     whatsapp_phone_number_id: str | None = None
     x_bearer_token: SecretStr | None = None
+    gemini_api_key: SecretStr | None = None
 
 
 @lru_cache
