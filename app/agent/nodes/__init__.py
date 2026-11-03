@@ -1,0 +1,1 @@
+"""Nodos del StateGraph inicial."""
