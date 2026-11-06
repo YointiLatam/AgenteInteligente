@@ -2,6 +2,7 @@
 
 from typing import Literal
 
+from app.agent.nodes.memory import conversation_context
 from app.agent.state import AgentState
 from app.integrations.gemini import TextGenerator
 
@@ -17,7 +18,9 @@ def _router_prompt(state: AgentState) -> str:
         "Clasifica la consulta para un asistente. Responde solo una palabra: 'rag' si "
         "requiere recuperar contexto documental, o 'reasoning' si puede responderse sin "
         "recuperación. La señal retrieval_requested es "
-        f"{state['retrieval_requested']}. Consulta: {state['query']}"
+        f"{state['retrieval_requested']}.\n"
+        f"Memoria conversacional:\n{conversation_context(state)}\n"
+        f"Consulta actual: {state['query']}"
     )
 
 

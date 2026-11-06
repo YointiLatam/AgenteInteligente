@@ -145,6 +145,11 @@ def test_grafo_conserva_payloads_de_router_y_reasoning():
 
     assert result["messages"] == [
         {
+            "role": "user",
+            "content": "¿Cómo funciona JWT?",
+            "raw_payload": {},
+        },
+        {
             "role": "router",
             "content": "reasoning",
             "raw_payload": {"provider": "gemini", "input_tokens": 3},
