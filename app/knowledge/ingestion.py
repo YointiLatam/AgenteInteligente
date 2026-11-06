@@ -124,12 +124,19 @@ class GeminiEmbedder:
         self._client = genai.Client(api_key=settings.gemini_api_key.get_secret_value())
 
     def embed(self, text: str) -> list[float]:
+        return self._embed(text, task_type="RETRIEVAL_DOCUMENT")
+
+    def embed_query(self, text: str) -> list[float]:
+        """Genera un vector de consulta compatible con los documentos ingeridos."""
+        return self._embed(text, task_type="RETRIEVAL_QUERY")
+
+    def _embed(self, text: str, *, task_type: str) -> list[float]:
         response = self._client.models.embed_content(
             model=self.model,
             contents=text,
             config=types.EmbedContentConfig(
                 output_dimensionality=self.dimensions,
-                task_type="RETRIEVAL_DOCUMENT",
+                task_type=task_type,
             ),
         )
         vector = [float(value) for value in response.embeddings[0].values]
