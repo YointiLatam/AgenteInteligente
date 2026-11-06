@@ -14,7 +14,7 @@ class RetrievedDocument(TypedDict):
 class AgentMessage(TypedDict):
     """Mensaje generado por el flujo y sus metadatos de proveedor seguros."""
 
-    role: Literal["router", "assistant"]
+    role: Literal["user", "router", "assistant"]
     content: str
     raw_payload: dict[str, Any]
 
@@ -27,5 +27,9 @@ class AgentState(TypedDict):
     route: Literal["rag", "reasoning"] | None
     documents: list[RetrievedDocument]
     messages: list[AgentMessage]
+    conversation_summary: str
+    summary_cursor: int
+    summary_failure_cursor: int | None
+    new_turn: bool
     answer: str | None
     error: str | None

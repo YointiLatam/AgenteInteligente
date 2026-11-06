@@ -1,5 +1,6 @@
 """Generación de respuestas mediante Gemini."""
 
+from app.agent.nodes.memory import conversation_context
 from app.agent.state import AgentState
 from app.integrations.gemini import TextGenerator
 
@@ -17,7 +18,9 @@ def _reasoning_prompt(state: AgentState) -> str:
     context = "\n".join(document["content"] for document in state["documents"])
     return (
         "Responde en español de forma breve y útil. Usa el contexto solo si está disponible.\n"
-        f"Consulta: {state['query']}\nContexto: {context or '(sin contexto recuperado)'}"
+        f"Memoria conversacional:\n{conversation_context(state)}\n"
+        f"Consulta actual: {state['query']}\n"
+        f"Contexto documental: {context or '(sin contexto recuperado)'}"
     )
 
 

@@ -9,7 +9,7 @@ from app.agent.checkpointer import (
     postgres_checkpointer,
     setup_postgres_checkpointer,
 )
-from app.agent.graph import build_agent_graph, invoke_agent
+from app.agent.graph import PendingCheckpointError, build_agent_graph, invoke_agent
 from app.agent.state import AgentState, RetrievedDocument
 from app.integrations.gemini import GeminiResult
 from app.knowledge.settings import KnowledgeSettings
@@ -120,6 +120,104 @@ def test_checkpointer_no_altera_rutas_reasoning_ni_rag():
 def test_thread_id_requiere_checkpointer():
     with pytest.raises(ValueError, match="requiere un checkpointer"):
         invoke_agent(_state(), thread_id="without-saver", recursion_limit=3)
+
+
+def test_hilo_nuevo_descarta_memoria_historica_recibida_en_la_entrada():
+    state = _state()
+    state.update(
+        {
+            "messages": [{"role": "assistant", "content": "No conservar", "raw_payload": {}}],
+            "conversation_summary": "No conservar",
+            "summary_cursor": 8,
+            "summary_failure_cursor": 8,
+        }
+    )
+
+    result = invoke_agent(
+        state,
+        gemini_client=FakeGemini("reasoning", "Respuesta nueva."),
+        checkpointer=InMemorySaver(),
+        thread_id="new-thread",
+        recursion_limit=3,
+    )
+
+    assert [message["content"] for message in result["messages"]] == [
+        "¿Cómo funciona JWT?",
+        "reasoning",
+        "Respuesta nueva.",
+    ]
+    assert "No conservar" not in str(result)
+
+
+def test_hilo_existente_descarta_memoria_historica_recibida_y_preserva_checkpoint():
+    checkpointer = InMemorySaver()
+    invoke_agent(
+        _state(),
+        gemini_client=FakeGemini("reasoning", "Respuesta persistida."),
+        checkpointer=checkpointer,
+        thread_id="existing-thread",
+        recursion_limit=3,
+    )
+    incoming = _state()
+    incoming.update(
+        {
+            "query": "Siguiente consulta",
+            "messages": [{"role": "assistant", "content": "Inyectado", "raw_payload": {}}],
+            "conversation_summary": "Inyectado",
+            "summary_cursor": 99,
+            "summary_failure_cursor": 99,
+        }
+    )
+
+    result = invoke_agent(
+        incoming,
+        gemini_client=FakeGemini("reasoning", "Segunda respuesta."),
+        checkpointer=checkpointer,
+        thread_id="existing-thread",
+        recursion_limit=3,
+    )
+
+    assert "Inyectado" not in str(result)
+    assert [message["content"] for message in result["messages"] if message["role"] == "user"] == [
+        "¿Cómo funciona JWT?",
+        "Siguiente consulta",
+    ]
+
+
+def test_hilo_con_checkpoint_pendiente_rechaza_un_nuevo_turno():
+    checkpointer = InMemorySaver()
+    graph = build_agent_graph(checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": "pending-thread"}, "recursion_limit": 4}
+    graph.invoke({**_state(), "new_turn": True}, config, interrupt_before=["router"])
+
+    with pytest.raises(PendingCheckpointError, match="trabajo pendiente"):
+        invoke_agent(
+            _state(),
+            checkpointer=checkpointer,
+            thread_id="pending-thread",
+            recursion_limit=3,
+        )
+
+
+def test_ejecucion_sin_checkpointer_inicializa_memoria_y_descarta_historial_de_entrada():
+    state = _state()
+    state.update(
+        {
+            "messages": [{"role": "assistant", "content": "Ignorar", "raw_payload": {}}],
+            "conversation_summary": "Ignorar",
+            "summary_cursor": 5,
+            "summary_failure_cursor": None,
+        }
+    )
+
+    result = invoke_agent(
+        state,
+        gemini_client=FakeGemini("reasoning", "Respuesta local."),
+        recursion_limit=3,
+    )
+
+    assert "Ignorar" not in str(result)
+    assert result["messages"][0]["role"] == "user"
 
 
 class FakeConnection:
