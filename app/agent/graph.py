@@ -2,6 +2,7 @@
 
 from functools import partial
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.nodes.reasoning import reasoning_node
@@ -14,7 +15,9 @@ from app.knowledge.retrieval import configured_retriever
 
 
 def build_agent_graph(
-    retriever: Retriever | None = None, gemini_client: TextGenerator | None = None
+    retriever: Retriever | None = None,
+    gemini_client: TextGenerator | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
 ):
     """Compila el flujo Router -> (RAG | Reasoning) -> Reasoning -> END."""
     client = gemini_client
@@ -37,7 +40,7 @@ def build_agent_graph(
     )
     builder.add_edge("rag_retrieval", "reasoning")
     builder.add_edge("reasoning", END)
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
 def invoke_agent(
@@ -45,8 +48,15 @@ def invoke_agent(
     *,
     retriever: Retriever | None = None,
     gemini_client: TextGenerator | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+    thread_id: str | None = None,
     recursion_limit: int,
 ) -> AgentState:
     """Ejecuta el grafo aplicando explícitamente el límite de recursión indicado."""
-    graph = build_agent_graph(retriever, gemini_client)
-    return graph.invoke(state, {"recursion_limit": recursion_limit})
+    if thread_id is not None and checkpointer is None:
+        raise ValueError("thread_id requiere un checkpointer configurado")
+    graph = build_agent_graph(retriever, gemini_client, checkpointer)
+    config: dict = {"recursion_limit": recursion_limit}
+    if thread_id is not None:
+        config["configurable"] = {"thread_id": thread_id}
+    return graph.invoke(state, config)
