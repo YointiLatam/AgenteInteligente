@@ -87,6 +87,7 @@ def test_limite_insuficiente_interrumpe_el_recorrido_rag():
 
 
 def test_grafo_degrada_sin_api_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setattr(
         graph_module,
         "get_integrations_settings",
@@ -97,6 +98,24 @@ def test_grafo_degrada_sin_api_key(monkeypatch):
 
     assert result["route"] == "reasoning"
     assert result["answer"] == "Respuesta sin contexto recuperado para: ¿Cómo funciona JWT?"
+
+
+def test_grafo_usa_recuperador_configurado_solo_en_ruta_rag(monkeypatch):
+    document: RetrievedDocument = {
+        "id": "documento:7:0",
+        "content": "cod_ficha: F-001",
+        "score": 0.9,
+    }
+    monkeypatch.setattr(graph_module, "configured_retriever", lambda _: [document])
+
+    result = graph_module.invoke_agent(
+        _state(retrieval_requested=True),
+        gemini_client=FakeGemini("rag", "Respuesta con ficha."),
+        recursion_limit=4,
+    )
+
+    assert result["documents"] == [document]
+    assert result["answer"] == "Respuesta con ficha."
 
 
 def test_grafo_conserva_payloads_de_router_y_reasoning():

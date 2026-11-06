@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +18,7 @@ class KnowledgeSettings(BaseSettings):
     knowledge_schema: str = "inmobiliaria_pruebas"
     chunk_size: int = 800
     chunk_overlap: int = 120
+    retrieval_top_k: int = Field(default=4, ge=1, le=10)
 
 
 @lru_cache
