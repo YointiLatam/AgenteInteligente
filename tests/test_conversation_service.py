@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from threading import Event, Lock, Thread
 from uuid import UUID, uuid4, uuid5
 
@@ -8,6 +9,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agent.graph import build_agent_graph
+from app.agent.tools import AgentTool, ToolEffect, ToolRegistry
 from app.conversations.repository import (
     Channel,
     ConversationPersistenceError,
@@ -18,6 +20,8 @@ from app.conversations.repository import (
 )
 from app.conversations.service import (
     ConversationService,
+    PendingApprovalResult,
+    ThreadPausedError,
     TurnIdempotencyConflictError,
     TurnRecoveryRequiredError,
     UserTurnRequest,
@@ -73,6 +77,16 @@ class MemoryRepository:
     def get_message(self, thread_id: UUID, idempotency_key: str) -> StoredMessage | None:
         return self._messages.get((thread_id, idempotency_key))
 
+    def get_thread(self, thread_id: UUID) -> ConversationThread:
+        return next(thread for thread in self._threads.values() if thread.id == thread_id)
+
+    def mark_thread_paused_hil(self, thread_id: UUID) -> ConversationThread:
+        thread = self.get_thread(thread_id)
+        paused = replace(thread, status="paused_hil")
+        key = (thread.channel, thread.external_conversation_id)
+        self._threads[key] = paused
+        return paused
+
     def store_message(
         self,
         *,
@@ -108,6 +122,11 @@ class MemoryRepository:
             for (stored_thread, _), message in self._messages.items()
             if stored_thread == thread_id
         ]
+
+
+class FailingPauseRepository(MemoryRepository):
+    def mark_thread_paused_hil(self, thread_id: UUID) -> ConversationThread:
+        raise ConversationPersistenceError("pause failed")
 
 
 class AdvisoryConnection:
@@ -282,6 +301,169 @@ def test_checkpoint_pendiente_no_se_recupera_como_respuesta_final():
 
     with pytest.raises(TurnRecoveryRequiredError, match="no puede asociarse"):
         service.process_user_turn(request)
+
+
+def test_aprobacion_pendiente_se_recupera_sin_repetir_el_grafo_y_pausa_el_thread():
+    repository = MemoryRepository()
+    saver = InMemorySaver()
+    executions: list[dict] = []
+    registry = ToolRegistry(
+        {
+            "publish": AgentTool(
+                "publish",
+                ToolEffect.EXTERNAL_WRITE,
+                lambda arguments: executions.append(arguments) or {"published": True},
+            )
+        }
+    )
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+        recursion_limit=4,
+    )  # type: ignore[arg-type]
+    thread = repository.get_or_create_thread("web_widget", "visitor-1")
+    request = UserTurnRequest("web_widget", "visitor-1", "req-1", "Publica esto")
+    turn_id = uuid5(thread.id, request.request_id)
+    repository.store_message(
+        thread_id=thread.id,
+        turn_id=turn_id,
+        role="user",
+        content=request.content,
+        raw_payload=service._user_payload(request),
+        idempotency_key="user:req-1",
+    )
+    graph = build_agent_graph(
+        gemini_client=FakeGemini([_result("reasoning"), _result("Preparado")]),
+        checkpointer=saver,
+        tool_registry=registry,
+    )
+    state = service._state(request.content, False, str(turn_id))
+    state["tool_call"] = {
+        "call_id": "call-1",
+        "tool_name": "publish",
+        "arguments": {"content": "Publica esto"},
+    }
+    graph.invoke(
+        state,
+        {"configurable": {"thread_id": thread.langgraph_thread_id}, "recursion_limit": 8},
+    )
+
+    recovered = service.process_user_turn(request)
+
+    assert isinstance(recovered, PendingApprovalResult)
+    assert recovered.replayed is True
+    assert recovered.thread.status == "paused_hil"
+    assert recovered.tool_call["call_id"] == "call-1"
+    assert executions == []
+
+
+def test_thread_pausado_rechaza_un_request_nuevo_sin_guardar_otro_mensaje():
+    repository = MemoryRepository()
+    service = _service(repository, FakeGemini([]))
+    thread = repository.get_or_create_thread("web_widget", "visitor-1")
+    repository.mark_thread_paused_hil(thread.id)
+
+    with pytest.raises(ThreadPausedError, match="pausada"):
+        service.process_user_turn(
+            UserTurnRequest("web_widget", "visitor-1", "req-2", "Otro mensaje")
+        )
+
+    assert repository.list_messages(thread.id) == []
+
+
+def test_checkpoint_hitl_reconcilia_thread_activo_antes_de_aceptar_otro_turno():
+    repository = MemoryRepository()
+    saver = InMemorySaver()
+    registry = ToolRegistry(
+        {
+            "write": AgentTool(
+                "write", ToolEffect.DATABASE_WRITE, lambda _: {"written": True}
+            )
+        }
+    )
+    thread = repository.get_or_create_thread("web_widget", "visitor-1")
+    graph = build_agent_graph(
+        gemini_client=FakeGemini([_result("reasoning"), _result("Preparado")]),
+        checkpointer=saver,
+        tool_registry=registry,
+    )
+    state = ConversationService._state("Actualiza", False, str(uuid4()))
+    state["tool_call"] = {
+        "call_id": "call-1",
+        "tool_name": "write",
+        "arguments": {},
+    }
+    graph.invoke(
+        state,
+        {"configurable": {"thread_id": thread.langgraph_thread_id}, "recursion_limit": 8},
+    )
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+
+    with pytest.raises(ThreadPausedError, match="pausada"):
+        service.process_user_turn(
+            UserTurnRequest("web_widget", "visitor-1", "req-2", "Nuevo turno")
+        )
+
+    assert repository.get_thread(thread.id).status == "paused_hil"
+    assert repository.list_messages(thread.id) == []
+
+
+def test_fallo_al_proyectar_paused_hil_conserva_checkpoint_y_no_ejecuta_herramienta():
+    repository = FailingPauseRepository()
+    saver = InMemorySaver()
+    executions: list[dict] = []
+    registry = ToolRegistry(
+        {
+            "publish": AgentTool(
+                "publish",
+                ToolEffect.EXTERNAL_WRITE,
+                lambda arguments: executions.append(arguments) or {},
+            )
+        }
+    )
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+    thread = repository.get_or_create_thread("web_widget", "visitor-1")
+    request = UserTurnRequest("web_widget", "visitor-1", "req-1", "Publica")
+    turn_id = uuid5(thread.id, request.request_id)
+    repository.store_message(
+        thread_id=thread.id,
+        turn_id=turn_id,
+        role="user",
+        content=request.content,
+        raw_payload=service._user_payload(request),
+        idempotency_key="user:req-1",
+    )
+    graph = build_agent_graph(
+        gemini_client=FakeGemini([_result("reasoning"), _result("Preparado")]),
+        checkpointer=saver,
+        tool_registry=registry,
+    )
+    state = service._state(request.content, False, str(turn_id))
+    state["tool_call"] = {
+        "call_id": "call-1",
+        "tool_name": "publish",
+        "arguments": {},
+    }
+    config = {"configurable": {"thread_id": thread.langgraph_thread_id}, "recursion_limit": 8}
+    graph.invoke(state, config)
+
+    with pytest.raises(ConversationPersistenceError, match="pause failed"):
+        service.process_user_turn(request)
+
+    assert graph.get_state(config).next == ("critical_tools",)
+    assert executions == []
 
 
 def test_reintento_recupera_checkpoint_si_falla_escritura_de_respuesta():

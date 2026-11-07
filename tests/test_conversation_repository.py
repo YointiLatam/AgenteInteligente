@@ -41,3 +41,35 @@ def test_reutilizar_hilo_existente_no_actualiza_updated_at():
     assert "ON CONFLICT (channel, external_conversation_id) DO NOTHING" in connection.statements[0]
     assert "updated_at" not in connection.statements[0]
     assert "SELECT id, channel" in connection.statements[1]
+
+
+class PauseConnection:
+    def __init__(self, paused: dict) -> None:
+        self.paused = paused
+        self.statement = ""
+        self.params: tuple = ()
+
+    def execute(self, statement: str, params: tuple) -> _Result:
+        self.statement = statement
+        self.params = params
+        return _Result(self.paused)
+
+
+def test_pausar_hilo_es_una_transicion_condicionada_e_idempotente():
+    thread_id = uuid4()
+    paused = {
+        "id": thread_id,
+        "channel": "web_widget",
+        "external_conversation_id": "visitor-1",
+        "langgraph_thread_id": "thread-1",
+        "status": "paused_hil",
+    }
+    connection = PauseConnection(paused)
+    repository = ConversationRepository(connection)  # type: ignore[arg-type]
+
+    thread = repository.mark_thread_paused_hil(thread_id)
+
+    assert thread.status == "paused_hil"
+    assert "status IN ('active', 'paused_hil')" in connection.statement
+    assert "WHEN status = 'paused_hil' THEN updated_at" in connection.statement
+    assert connection.params == (thread_id,)
