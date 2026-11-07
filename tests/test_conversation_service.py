@@ -17,11 +17,16 @@ from app.conversations.repository import (
     ConversationThread,
     MessageRole,
     StoredMessage,
+    ToolExecution,
 )
 from app.conversations.service import (
     ConversationService,
     PendingApprovalResult,
     ThreadPausedError,
+    ToolDecisionConflictError,
+    ToolDecisionOutOfOrderError,
+    ToolDecisionRequest,
+    ToolExecutionUncertainError,
     TurnIdempotencyConflictError,
     TurnRecoveryRequiredError,
     UserTurnRequest,
@@ -54,10 +59,17 @@ class BlockingGemini(FakeGemini):
 
 
 class MemoryRepository:
-    def __init__(self, *, fail_first_agent_write: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_first_agent_write: bool = False,
+        fail_first_tool_completion: bool = False,
+    ) -> None:
         self._threads: dict[tuple[Channel, str], ConversationThread] = {}
         self._messages: dict[tuple[UUID, str], StoredMessage] = {}
+        self._tool_executions: dict[tuple[UUID, str], ToolExecution] = {}
         self.fail_first_agent_write = fail_first_agent_write
+        self.fail_first_tool_completion = fail_first_tool_completion
 
     def get_or_create_thread(
         self, channel: Channel, external_conversation_id: str
@@ -86,6 +98,83 @@ class MemoryRepository:
         key = (thread.channel, thread.external_conversation_id)
         self._threads[key] = paused
         return paused
+
+    def mark_thread_active(self, thread_id: UUID) -> ConversationThread:
+        thread = self.get_thread(thread_id)
+        active = replace(thread, status="active")
+        key = (thread.channel, thread.external_conversation_id)
+        self._threads[key] = active
+        return active
+
+    def get_tool_execution(self, thread_id: UUID, call_id: str) -> ToolExecution | None:
+        return self._tool_executions.get((thread_id, call_id))
+
+    def get_tool_execution_by_decision(
+        self, thread_id: UUID, decision_id: str
+    ) -> ToolExecution | None:
+        return next(
+            (
+                execution
+                for execution in self._tool_executions.values()
+                if execution.thread_id == thread_id
+                and execution.decision_id == decision_id
+            ),
+            None,
+        )
+
+    def create_tool_execution(
+        self,
+        *,
+        thread_id: UUID,
+        turn_id: UUID,
+        call_id: str,
+        tool_name: str,
+        decision_id: str,
+        decision: str,
+        approved_by: str,
+        result: dict,
+    ) -> tuple[ToolExecution, bool]:
+        existing = self.get_tool_execution(thread_id, call_id)
+        if existing is not None:
+            return existing, False
+        existing = self.get_tool_execution_by_decision(thread_id, decision_id)
+        if existing is not None:
+            return existing, False
+        execution = ToolExecution(
+            id=uuid4(),
+            thread_id=thread_id,
+            turn_id=turn_id,
+            call_id=call_id,
+            tool_name=tool_name,
+            decision_id=decision_id,
+            decision=decision,  # type: ignore[arg-type]
+            status="processing",
+            approved_by=approved_by,
+            result=result,
+        )
+        self._tool_executions[(thread_id, call_id)] = execution
+        return execution, True
+
+    def complete_tool_execution(
+        self, execution_id: UUID, result: dict
+    ) -> ToolExecution:
+        if self.fail_first_tool_completion:
+            self.fail_first_tool_completion = False
+            raise ConversationPersistenceError("tool execution write failed")
+        return self._finish_tool_execution(execution_id, "completed", result)
+
+    def fail_tool_execution(self, execution_id: UUID, result: dict) -> ToolExecution:
+        return self._finish_tool_execution(execution_id, "failed", result)
+
+    def _finish_tool_execution(
+        self, execution_id: UUID, status: str, result: dict
+    ) -> ToolExecution:
+        execution = next(
+            item for item in self._tool_executions.values() if item.id == execution_id
+        )
+        updated = replace(execution, status=status, result=result)  # type: ignore[arg-type]
+        self._tool_executions[(execution.thread_id, execution.call_id)] = updated
+        return updated
 
     def store_message(
         self,
@@ -169,6 +258,66 @@ def _result(text: str, **payload: object) -> GeminiResult:
 
 def _service(repository: MemoryRepository, client: FakeGemini) -> ConversationService:
     return ConversationService(repository, InMemorySaver(), gemini_client=client, recursion_limit=3)  # type: ignore[arg-type]
+
+
+def _seed_pending_tool(
+    repository: MemoryRepository,
+    saver: InMemorySaver,
+    registry: ToolRegistry,
+    *,
+    tool_name: str = "publish",
+    request_id: str = "req-1",
+) -> tuple[ConversationThread, UUID]:
+    thread = repository.get_or_create_thread("web_widget", "visitor-1")
+    turn_id = uuid5(thread.id, request_id)
+    repository.store_message(
+        thread_id=thread.id,
+        turn_id=turn_id,
+        role="user",
+        content="Ejecuta",
+        raw_payload={"_conversation": {"retrieval_requested": False}},
+        idempotency_key=f"user:{request_id}",
+    )
+    graph = build_agent_graph(
+        gemini_client=FakeGemini([_result("reasoning"), _result("Preparado")]),
+        checkpointer=saver,
+        tool_registry=registry,
+    )
+    state = ConversationService._state("Ejecuta", False, str(turn_id))
+    state["tool_call"] = {
+        "call_id": "call-1",
+        "tool_name": tool_name,
+        "arguments": {"value": 7},
+    }
+    graph.invoke(
+        state,
+        {"configurable": {"thread_id": thread.langgraph_thread_id}, "recursion_limit": 8},
+    )
+    repository.mark_thread_paused_hil(thread.id)
+    return thread, turn_id
+
+
+def _decision(
+    thread: ConversationThread,
+    turn_id: UUID,
+    *,
+    decision: str = "approved",
+    decision_id: str = "decision-1",
+    call_id: str = "call-1",
+    tool_name: str = "publish",
+    approved_by: str = "operator-1",
+    reason: str | None = None,
+) -> ToolDecisionRequest:
+    return ToolDecisionRequest(
+        decision_id=decision_id,
+        thread_id=thread.id,
+        turn_id=turn_id,
+        call_id=call_id,
+        tool_name=tool_name,
+        decision=decision,  # type: ignore[arg-type]
+        approved_by=approved_by,
+        reason=reason,
+    )
 
 
 def test_persiste_user_y_agent_sin_evento_router_y_conserva_payload():
@@ -464,6 +613,386 @@ def test_fallo_al_proyectar_paused_hil_conserva_checkpoint_y_no_ejecuta_herramie
 
     assert graph.get_state(config).next == ("critical_tools",)
     assert executions == []
+
+
+def test_aprobacion_reanuda_una_vez_registra_resultado_y_admite_replay():
+    repository = MemoryRepository()
+    saver = InMemorySaver()
+    calls: list[dict] = []
+    registry = ToolRegistry(
+        {
+            "publish": AgentTool(
+                "publish",
+                ToolEffect.EXTERNAL_WRITE,
+                lambda arguments: calls.append(arguments) or {"published": True},
+            )
+        }
+    )
+    thread, turn_id = _seed_pending_tool(repository, saver, registry)
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+    request = _decision(thread, turn_id)
+
+    result = service.decide_tool_call(request)
+    replay = service.decide_tool_call(request)
+
+    assert result.replayed is False
+    assert replay.replayed is True
+    assert result.execution.status == "completed"
+    assert result.execution.approved_by == "operator-1"
+    assert result.execution.result == {"published": True}
+    assert result.thread.status == "active"
+    assert calls == [{"value": 7}]
+    graph = build_agent_graph(checkpointer=saver, tool_registry=registry)
+    assert graph.get_state(
+        {"configurable": {"thread_id": thread.langgraph_thread_id}}
+    ).next == ()
+
+
+def test_rechazo_finaliza_checkpoint_sin_ejecutar_handler_y_admite_replay():
+    repository = MemoryRepository()
+    saver = InMemorySaver()
+    calls: list[dict] = []
+    registry = ToolRegistry(
+        {
+            "publish": AgentTool(
+                "publish",
+                ToolEffect.EXTERNAL_WRITE,
+                lambda arguments: calls.append(arguments) or {},
+            )
+        }
+    )
+    thread, turn_id = _seed_pending_tool(repository, saver, registry)
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+    request = _decision(
+        thread, turn_id, decision="rejected", reason="Contenido no autorizado"
+    )
+
+    result = service.decide_tool_call(request)
+    replay = service.decide_tool_call(request)
+
+    assert result.execution.result == {
+        "decision": "rejected",
+        "reason": "Contenido no autorizado",
+    }
+    assert result.thread.status == "active"
+    assert replay.replayed is True
+    assert calls == []
+
+
+def test_rechazo_de_herramienta_ya_no_registrada_sigue_siendo_seguro():
+    repository = MemoryRepository()
+    saver = InMemorySaver()
+    registry = ToolRegistry()
+    thread, turn_id = _seed_pending_tool(
+        repository, saver, registry, tool_name="missing"
+    )
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+
+    result = service.decide_tool_call(
+        _decision(
+            thread,
+            turn_id,
+            decision="rejected",
+            tool_name="missing",
+            reason="Herramienta retirada",
+        )
+    )
+
+    assert result.execution.status == "completed"
+    assert result.execution.result["decision"] == "rejected"
+
+
+def test_decisiones_incompatibles_reutilizadas_o_fuera_de_orden_se_rechazan():
+    repository = MemoryRepository()
+    saver = InMemorySaver()
+    registry = ToolRegistry(
+        {
+            "publish": AgentTool(
+                "publish", ToolEffect.EXTERNAL_WRITE, lambda _: {"published": True}
+            )
+        }
+    )
+    thread, turn_id = _seed_pending_tool(repository, saver, registry)
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+
+    with pytest.raises(ToolDecisionOutOfOrderError):
+        service.decide_tool_call(_decision(thread, turn_id, call_id="wrong-call"))
+
+    service.decide_tool_call(_decision(thread, turn_id))
+
+    with pytest.raises(ToolDecisionConflictError):
+        service.decide_tool_call(
+            _decision(
+                thread,
+                turn_id,
+                decision="rejected",
+                decision_id="decision-2",
+                reason="Tardío",
+            )
+        )
+    with pytest.raises(ToolDecisionConflictError, match="decision_id"):
+        service.decide_tool_call(
+            _decision(thread, turn_id, call_id="other-call")
+        )
+
+
+def test_fallo_del_handler_conserva_processing_y_no_se_reintenta():
+    repository = MemoryRepository()
+    saver = InMemorySaver()
+    calls = 0
+
+    def fail(_: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("provider unavailable")
+
+    registry = ToolRegistry(
+        {"publish": AgentTool("publish", ToolEffect.EXTERNAL_WRITE, fail)}
+    )
+    thread, turn_id = _seed_pending_tool(repository, saver, registry)
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+    request = _decision(thread, turn_id)
+
+    with pytest.raises(ToolExecutionUncertainError, match="permanece processing"):
+        service.decide_tool_call(request)
+    with pytest.raises(ToolExecutionUncertainError, match="no se repetirá"):
+        service.decide_tool_call(request)
+
+    execution = repository.get_tool_execution(thread.id, "call-1")
+    assert execution is not None and execution.status == "processing"
+    assert calls == 1
+    graph = build_agent_graph(checkpointer=saver, tool_registry=registry)
+    assert graph.get_state(
+        {"configurable": {"thread_id": thread.langgraph_thread_id}}
+    ).next == ("critical_tools",)
+
+
+def test_error_de_auditoria_posterior_se_reconcilia_sin_repetir_handler():
+    repository = MemoryRepository(fail_first_tool_completion=True)
+    saver = InMemorySaver()
+    calls: list[dict] = []
+    registry = ToolRegistry(
+        {
+            "publish": AgentTool(
+                "publish",
+                ToolEffect.EXTERNAL_WRITE,
+                lambda arguments: calls.append(arguments) or {"published": True},
+            )
+        }
+    )
+    thread, turn_id = _seed_pending_tool(repository, saver, registry)
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+    request = _decision(thread, turn_id)
+
+    with pytest.raises(ToolExecutionUncertainError, match="permanece processing"):
+        service.decide_tool_call(request)
+
+    pending = repository.get_tool_execution(thread.id, request.call_id)
+    assert pending is not None and pending.status == "processing"
+    assert calls == [{"value": 7}]
+
+    replay = service.decide_tool_call(request)
+
+    assert replay.replayed is True
+    assert replay.execution.status == "completed"
+    assert replay.execution.result == {"published": True}
+    assert calls == [{"value": 7}]
+
+
+def test_error_posterior_al_rechazo_se_reconcilia_sin_ejecutar_handler():
+    repository = MemoryRepository(fail_first_tool_completion=True)
+    saver = InMemorySaver()
+    calls: list[dict] = []
+    registry = ToolRegistry(
+        {
+            "publish": AgentTool(
+                "publish",
+                ToolEffect.EXTERNAL_WRITE,
+                lambda arguments: calls.append(arguments) or {"published": True},
+            )
+        }
+    )
+    thread, turn_id = _seed_pending_tool(repository, saver, registry)
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+    request = _decision(thread, turn_id, decision="rejected", reason="No autorizado")
+
+    with pytest.raises(ToolExecutionUncertainError, match="permanece processing"):
+        service.decide_tool_call(request)
+
+    pending = repository.get_tool_execution(thread.id, request.call_id)
+    assert pending is not None and pending.status == "processing"
+    assert calls == []
+
+    replay = service.decide_tool_call(request)
+
+    assert replay.replayed is True
+    assert replay.execution.status == "completed"
+    assert replay.execution.result == {
+        "decision": "rejected",
+        "reason": "No autorizado",
+    }
+    assert calls == []
+
+
+def test_processing_con_checkpoint_completado_se_reconcilia_sin_repetir_handler():
+    repository = MemoryRepository()
+    saver = InMemorySaver()
+    calls: list[dict] = []
+    registry = ToolRegistry(
+        {
+            "publish": AgentTool(
+                "publish",
+                ToolEffect.EXTERNAL_WRITE,
+                lambda arguments: calls.append(arguments) or {"published": True},
+            )
+        }
+    )
+    thread, turn_id = _seed_pending_tool(repository, saver, registry)
+    request = _decision(thread, turn_id)
+    execution, created = repository.create_tool_execution(
+        thread_id=thread.id,
+        turn_id=turn_id,
+        call_id=request.call_id,
+        tool_name=request.tool_name,
+        decision_id=request.decision_id,
+        decision=request.decision,
+        approved_by=request.approved_by,
+        result={},
+    )
+    assert created and execution.status == "processing"
+    graph = build_agent_graph(checkpointer=saver, tool_registry=registry)
+    config = {"configurable": {"thread_id": thread.langgraph_thread_id}}
+    graph.invoke(None, config)
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+
+    result = service.decide_tool_call(request)
+
+    assert result.replayed is True
+    assert result.execution.status == "completed"
+    assert result.execution.result == {"published": True}
+    assert calls == [{"value": 7}]
+
+
+def test_aprobaciones_concurrentes_ejecutan_el_handler_una_sola_vez():
+    repository = MemoryRepository()
+    saver = InMemorySaver()
+    started = Event()
+    release = Event()
+    calls = 0
+
+    def blocking(arguments: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        started.set()
+        assert release.wait(timeout=5)
+        return {"value": arguments["value"]}
+
+    registry = ToolRegistry(
+        {"publish": AgentTool("publish", ToolEffect.EXTERNAL_WRITE, blocking)}
+    )
+    thread, turn_id = _seed_pending_tool(repository, saver, registry)
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+    request = _decision(thread, turn_id)
+    results = []
+    errors = []
+
+    def decide() -> None:
+        try:
+            results.append(service.decide_tool_call(request))
+        except Exception as error:  # pragma: no cover - facilita diagnóstico concurrente.
+            errors.append(error)
+
+    first = Thread(target=decide)
+    second = Thread(target=decide)
+    first.start()
+    assert started.wait(timeout=5)
+    second.start()
+    release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert errors == []
+    assert calls == 1
+    assert len(results) == 2
+    assert sorted(result.replayed for result in results) == [False, True]
+
+
+def test_processing_pendiente_no_se_reanuda_automaticamente():
+    repository = MemoryRepository()
+    saver = InMemorySaver()
+    registry = ToolRegistry(
+        {
+            "publish": AgentTool(
+                "publish", ToolEffect.EXTERNAL_WRITE, lambda _: {"published": True}
+            )
+        }
+    )
+    thread, turn_id = _seed_pending_tool(repository, saver, registry)
+    request = _decision(thread, turn_id)
+    repository.create_tool_execution(
+        thread_id=thread.id,
+        turn_id=turn_id,
+        call_id=request.call_id,
+        tool_name=request.tool_name,
+        decision_id=request.decision_id,
+        decision=request.decision,
+        approved_by=request.approved_by,
+        result={},
+    )
+    service = ConversationService(
+        repository,
+        saver,
+        gemini_client=FakeGemini([]),
+        tool_registry=registry,
+    )  # type: ignore[arg-type]
+
+    with pytest.raises(ToolExecutionUncertainError, match="no se repetirá"):
+        service.decide_tool_call(request)
 
 
 def test_reintento_recupera_checkpoint_si_falla_escritura_de_respuesta():

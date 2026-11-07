@@ -131,3 +131,80 @@ def test_registro_vacio_conserva_el_recorrido_normal_sin_herramientas():
     assert result["answer"] == "Respuesta"
     assert result["execution_status"] == "completed"
     assert result["pending_tool_call"] is None
+
+
+def test_aprobacion_reanuda_el_checkpoint_y_ejecuta_una_sola_vez():
+    calls: list[dict] = []
+    registry = ToolRegistry(
+        {
+            "publish": AgentTool(
+                "publish",
+                ToolEffect.EXTERNAL_WRITE,
+                lambda arguments: calls.append(arguments) or {"published": True},
+            )
+        }
+    )
+    saver = InMemorySaver()
+    graph = build_agent_graph(
+        gemini_client=FakeGemini("reasoning", "Preparado"),
+        checkpointer=saver,
+        tool_registry=registry,
+    )
+    config = _config("approved-thread")
+    graph.invoke(_state("publish"), config)
+
+    rebuilt = build_agent_graph(checkpointer=saver, tool_registry=registry)
+    result = rebuilt.invoke(None, config)
+    replay = rebuilt.invoke(None, config)
+
+    assert calls == [{"value": 7}]
+    assert result["tool_result"] == {"published": True}
+    assert result["execution_status"] == "completed"
+    assert replay["tool_result"] == {"published": True}
+    assert rebuilt.get_state(config).next == ()
+
+
+def test_rechazo_resuelve_checkpoint_sin_ejecutar_herramienta():
+    calls: list[dict] = []
+    registry = ToolRegistry(
+        {
+            "publish": AgentTool(
+                "publish",
+                ToolEffect.EXTERNAL_WRITE,
+                lambda arguments: calls.append(arguments) or {"published": True},
+            )
+        }
+    )
+    saver = InMemorySaver()
+    graph = build_agent_graph(
+        gemini_client=FakeGemini("reasoning", "Preparado"),
+        checkpointer=saver,
+        tool_registry=registry,
+    )
+    config = _config("rejected-thread")
+    graph.invoke(_state("publish"), config)
+
+    rebuilt = build_agent_graph(checkpointer=saver, tool_registry=registry)
+    rebuilt.update_state(
+        config,
+        {
+            "execution_status": "completed",
+            "pending_tool_call": None,
+            "tool_call": None,
+            "completed_turn_id": "turn-1",
+            "tool_result": {
+                "status": "rejected",
+                "reason": "Operación no autorizada",
+            },
+        },
+        as_node="critical_tools",
+    )
+    result = rebuilt.invoke(None, config)
+
+    assert calls == []
+    assert result["execution_status"] == "completed"
+    assert result["tool_result"] == {
+        "status": "rejected",
+        "reason": "Operación no autorizada",
+    }
+    assert rebuilt.get_state(config).next == ()

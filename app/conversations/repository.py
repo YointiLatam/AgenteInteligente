@@ -19,6 +19,8 @@ CONVERSATION_SCHEMA = "inmobiliaria_pruebas"
 Channel = Literal["web_widget", "whatsapp", "meta"]
 MessageRole = Literal["user", "agent", "system", "human_operator"]
 ThreadStatus = Literal["active", "paused_hil", "closed"]
+ToolDecision = Literal["approved", "rejected"]
+ToolExecutionStatus = Literal["processing", "completed", "failed"]
 
 
 class ConversationPersistenceError(RuntimeError):
@@ -49,8 +51,22 @@ class StoredMessage:
     idempotency_key: str
 
 
+@dataclass(frozen=True)
+class ToolExecution:
+    id: UUID
+    thread_id: UUID
+    turn_id: UUID
+    call_id: str
+    tool_name: str
+    decision_id: str
+    decision: ToolDecision
+    status: ToolExecutionStatus
+    approved_by: str
+    result: dict[str, Any]
+
+
 class ConversationRepository:
-    """Acceso limitado a las dos tablas creadas para la actividad 6."""
+    """Acceso a conversaciones, mensajes y auditoría de herramientas."""
 
     def __init__(self, connection: psycopg.Connection) -> None:
         self._connection = connection
@@ -130,6 +146,149 @@ class ConversationRepository:
                 "La conversación no admite la transición a paused_hil"
             )
         return ConversationThread(**row)
+
+    def mark_thread_active(self, thread_id: UUID) -> ConversationThread:
+        """Reactiva idempotentemente un hilo cuyo checkpoint ya fue resuelto."""
+        try:
+            row = self._connection.execute(
+                f"""
+                UPDATE {CONVERSATION_SCHEMA}.conversation_threads
+                SET status = 'active',
+                    updated_at = CASE
+                        WHEN status = 'active' THEN updated_at
+                        ELSE CURRENT_TIMESTAMP
+                    END
+                WHERE id = %s AND status IN ('active', 'paused_hil')
+                RETURNING id, channel, external_conversation_id, langgraph_thread_id, status
+                """,
+                (thread_id,),
+            ).fetchone()
+        except psycopg.Error as error:
+            raise ConversationPersistenceError(
+                "No fue posible reactivar la conversación"
+            ) from error
+        if row is None:
+            raise ConversationPersistenceError(
+                "La conversación no admite la transición a active"
+            )
+        return ConversationThread(**row)
+
+    def get_tool_execution(self, thread_id: UUID, call_id: str) -> ToolExecution | None:
+        return self._find_tool_execution("thread_id = %s AND call_id = %s", (thread_id, call_id))
+
+    def get_tool_execution_by_decision(
+        self, thread_id: UUID, decision_id: str
+    ) -> ToolExecution | None:
+        return self._find_tool_execution(
+            "thread_id = %s AND decision_id = %s", (thread_id, decision_id)
+        )
+
+    def create_tool_execution(
+        self,
+        *,
+        thread_id: UUID,
+        turn_id: UUID,
+        call_id: str,
+        tool_name: str,
+        decision_id: str,
+        decision: ToolDecision,
+        approved_by: str,
+        result: dict[str, Any],
+    ) -> tuple[ToolExecution, bool]:
+        identifier = uuid4()
+        try:
+            row = self._connection.execute(
+                f"""
+                INSERT INTO {CONVERSATION_SCHEMA}.tool_executions
+                    (id, thread_id, turn_id, call_id, tool_name, decision_id,
+                     decision, status, approved_by, result)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'processing', %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING id, thread_id, turn_id, call_id, tool_name, decision_id,
+                          decision, status, approved_by, result
+                """,
+                (
+                    identifier,
+                    thread_id,
+                    turn_id,
+                    call_id,
+                    tool_name,
+                    decision_id,
+                    decision,
+                    approved_by,
+                    Jsonb(result),
+                ),
+            ).fetchone()
+        except psycopg.Error as error:
+            raise ConversationPersistenceError(
+                "No fue posible registrar la ejecución de herramienta"
+            ) from error
+        if row:
+            return ToolExecution(**row), True
+        existing = self.get_tool_execution(thread_id, call_id)
+        if existing is not None:
+            return existing, False
+        existing = self.get_tool_execution_by_decision(thread_id, decision_id)
+        if existing is not None:
+            return existing, False
+        raise ConversationPersistenceError("No fue posible confirmar la ejecución registrada")
+
+    def complete_tool_execution(
+        self, execution_id: UUID, result: dict[str, Any]
+    ) -> ToolExecution:
+        return self._finish_tool_execution(execution_id, "completed", result)
+
+    def fail_tool_execution(
+        self, execution_id: UUID, result: dict[str, Any]
+    ) -> ToolExecution:
+        return self._finish_tool_execution(execution_id, "failed", result)
+
+    def _find_tool_execution(
+        self, predicate: str, params: tuple[object, ...]
+    ) -> ToolExecution | None:
+        try:
+            row = self._connection.execute(
+                f"""
+                SELECT id, thread_id, turn_id, call_id, tool_name, decision_id,
+                       decision, status, approved_by, result
+                FROM {CONVERSATION_SCHEMA}.tool_executions
+                WHERE {predicate}
+                """,
+                params,
+            ).fetchone()
+        except psycopg.Error as error:
+            raise ConversationPersistenceError(
+                "No fue posible consultar la ejecución de herramienta"
+            ) from error
+        return ToolExecution(**row) if row else None
+
+    def _finish_tool_execution(
+        self,
+        execution_id: UUID,
+        status: Literal["completed", "failed"],
+        result: dict[str, Any],
+    ) -> ToolExecution:
+        try:
+            row = self._connection.execute(
+                f"""
+                UPDATE {CONVERSATION_SCHEMA}.tool_executions
+                SET status = %s, result = %s, updated_at = CURRENT_TIMESTAMP,
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND status = 'processing'
+                RETURNING id, thread_id, turn_id, call_id, tool_name, decision_id,
+                          decision, status, approved_by, result
+                """,
+                (status, Jsonb(result), execution_id),
+            ).fetchone()
+        except psycopg.Error as error:
+            raise ConversationPersistenceError(
+                "No fue posible finalizar la ejecución de herramienta"
+            ) from error
+        if row is None:
+            raise ConversationPersistenceError(
+                "La ejecución de herramienta no admite la transición solicitada"
+            )
+        return ToolExecution(**row)
 
     @contextmanager
     def thread_lock(self, langgraph_thread_id: str) -> Iterator[None]:
