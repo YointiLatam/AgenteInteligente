@@ -1,6 +1,6 @@
 """Tipos compartidos por los nodos del agente."""
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 
 class RetrievedDocument(TypedDict):
@@ -17,6 +17,7 @@ class AgentMessage(TypedDict):
     role: Literal["user", "router", "assistant"]
     content: str
     raw_payload: dict[str, Any]
+    turn_id: NotRequired[str]
 
 
 class AgentState(TypedDict):
@@ -31,5 +32,7 @@ class AgentState(TypedDict):
     summary_cursor: int
     summary_failure_cursor: int | None
     new_turn: bool
+    turn_id: str | None
+    completed_turn_id: str | None
     answer: str | None
     error: str | None

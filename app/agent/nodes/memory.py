@@ -104,7 +104,10 @@ def prepare_memory(
     """Registra un nuevo turno y comprime solo el tramo antiguo no resumido."""
     messages = list(state.get("messages", []))
     if state.get("new_turn", False):
-        messages.append({"role": "user", "content": state["query"], "raw_payload": {}})
+        message: AgentMessage = {"role": "user", "content": state["query"], "raw_payload": {}}
+        if state.get("turn_id") is not None:
+            message["turn_id"] = state["turn_id"]
+        messages.append(message)
 
     summary = state.get("conversation_summary", "")
     cursor = state.get("summary_cursor", 0)

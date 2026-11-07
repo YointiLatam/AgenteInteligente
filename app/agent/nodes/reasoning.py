@@ -29,16 +29,24 @@ def reasoning_node(
 ) -> dict[str, str | list]:
     """Genera respuesta con Gemini; conserva una degradación determinista ante fallos."""
     if gemini_client is None:
-        return {"answer": _fallback_answer(state)}
-    try:
-        result = gemini_client.generate(_reasoning_prompt(state))
-        answer = result.text.strip() or _fallback_answer(state)
-        raw_payload = result.raw_payload
-    except Exception:
         answer = _fallback_answer(state)
+        if state.get("turn_id") is None:
+            return {"answer": answer}
         raw_payload = {"provider": "gemini", "error": "generation_unavailable"}
-    messages = [
-        *state.get("messages", []),
-        {"role": "assistant", "content": answer, "raw_payload": raw_payload},
-    ]
-    return {"answer": answer, "messages": messages}
+    else:
+        try:
+            result = gemini_client.generate(_reasoning_prompt(state))
+            answer = result.text.strip() or _fallback_answer(state)
+            raw_payload = result.raw_payload
+        except Exception:
+            answer = _fallback_answer(state)
+            raw_payload = {"provider": "gemini", "error": "generation_unavailable"}
+    message = {"role": "assistant", "content": answer, "raw_payload": raw_payload}
+    if state.get("turn_id") is not None:
+        message["turn_id"] = state["turn_id"]
+    messages = [*state.get("messages", []), message]
+    return {
+        "answer": answer,
+        "messages": messages,
+        "completed_turn_id": state.get("turn_id"),
+    }
