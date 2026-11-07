@@ -73,3 +73,88 @@ def test_pausar_hilo_es_una_transicion_condicionada_e_idempotente():
     assert "status IN ('active', 'paused_hil')" in connection.statement
     assert "WHEN status = 'paused_hil' THEN updated_at" in connection.statement
     assert connection.params == (thread_id,)
+
+
+class ToolExecutionConnection:
+    def __init__(self, *rows: dict | None) -> None:
+        self._rows = iter(rows)
+        self.statements: list[str] = []
+        self.params: list[tuple] = []
+
+    def execute(self, statement: str, params: tuple) -> _Result:
+        self.statements.append(statement)
+        self.params.append(params)
+        return _Result(next(self._rows))
+
+
+def _tool_execution_row(*, status: str = "processing") -> dict:
+    return {
+        "id": uuid4(),
+        "thread_id": uuid4(),
+        "turn_id": uuid4(),
+        "call_id": "call-1",
+        "tool_name": "publish",
+        "decision_id": "decision-1",
+        "decision": "approved",
+        "status": status,
+        "approved_by": "reviewer@example.com",
+        "result": {"decision": "approved"},
+    }
+
+
+def test_crear_ejecucion_reserva_idempotencia_antes_de_reanudar():
+    row = _tool_execution_row()
+    connection = ToolExecutionConnection(row)
+    repository = ConversationRepository(connection)  # type: ignore[arg-type]
+
+    execution, created = repository.create_tool_execution(
+        thread_id=row["thread_id"],
+        turn_id=row["turn_id"],
+        call_id="call-1",
+        tool_name="publish",
+        decision_id="decision-1",
+        decision="approved",
+        approved_by="reviewer@example.com",
+        result={"decision": "approved"},
+    )
+
+    assert created is True
+    assert execution.status == "processing"
+    assert "ON CONFLICT DO NOTHING" in connection.statements[0]
+    assert "'processing'" in connection.statements[0]
+
+
+def test_conflicto_al_reservar_devuelve_la_ejecucion_existente():
+    row = _tool_execution_row()
+    connection = ToolExecutionConnection(None, row)
+    repository = ConversationRepository(connection)  # type: ignore[arg-type]
+
+    execution, created = repository.create_tool_execution(
+        thread_id=row["thread_id"],
+        turn_id=row["turn_id"],
+        call_id="call-1",
+        tool_name="publish",
+        decision_id="decision-1",
+        decision="approved",
+        approved_by="reviewer@example.com",
+        result={},
+    )
+
+    assert created is False
+    assert execution.id == row["id"]
+    assert "WHERE thread_id = %s AND call_id = %s" in connection.statements[1]
+
+
+def test_completar_ejecucion_solo_transiciona_desde_processing():
+    row = _tool_execution_row(status="completed")
+    row["result"] = {"published": True}
+    connection = ToolExecutionConnection(row)
+    repository = ConversationRepository(connection)  # type: ignore[arg-type]
+
+    execution = repository.complete_tool_execution(row["id"], {"published": True})
+
+    assert execution.status == "completed"
+    assert execution.result == {"published": True}
+    assert "status = 'processing'" in connection.statements[0]
+    assert "completed_at = CURRENT_TIMESTAMP" in connection.statements[0]
+    assert connection.params[0][2] == row["id"]
