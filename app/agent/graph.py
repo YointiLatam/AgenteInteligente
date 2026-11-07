@@ -29,6 +29,8 @@ def _new_turn_input(state: AgentState) -> dict[str, object]:
         "answer": None,
         "error": None,
         "new_turn": True,
+        "turn_id": state.get("turn_id"),
+        "completed_turn_id": None,
     }
 
 
