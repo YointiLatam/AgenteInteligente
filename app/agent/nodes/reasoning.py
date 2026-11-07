@@ -45,8 +45,10 @@ def reasoning_node(
     if state.get("turn_id") is not None:
         message["turn_id"] = state["turn_id"]
     messages = [*state.get("messages", []), message]
+    has_tool_call = state.get("tool_call") is not None
     return {
         "answer": answer,
         "messages": messages,
-        "completed_turn_id": state.get("turn_id"),
+        "completed_turn_id": None if has_tool_call else state.get("turn_id"),
+        "execution_status": "running" if has_tool_call else "completed",
     }

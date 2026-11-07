@@ -20,6 +20,20 @@ class AgentMessage(TypedDict):
     turn_id: NotRequired[str]
 
 
+class ToolCall(TypedDict):
+    """Solicitud estructurada de una herramienta, todavía no ejecutada."""
+
+    call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+
+
+class PendingToolCall(ToolCall):
+    """Solicitud crítica clasificada y persistida antes de la interrupción."""
+
+    effect: Literal["external_write", "database_write", "unknown"]
+
+
 class AgentState(TypedDict):
     """Estado mínimo compartido por el flujo inicial del agente."""
 
@@ -36,3 +50,7 @@ class AgentState(TypedDict):
     completed_turn_id: str | None
     answer: str | None
     error: str | None
+    execution_status: NotRequired[Literal["running", "pending_approval", "completed"]]
+    tool_call: NotRequired[ToolCall | None]
+    pending_tool_call: NotRequired[PendingToolCall | None]
+    tool_result: NotRequired[dict[str, Any] | None]

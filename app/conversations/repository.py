@@ -18,6 +18,7 @@ from app.knowledge.settings import KnowledgeSettings, get_knowledge_settings
 CONVERSATION_SCHEMA = "inmobiliaria_pruebas"
 Channel = Literal["web_widget", "whatsapp", "meta"]
 MessageRole = Literal["user", "agent", "system", "human_operator"]
+ThreadStatus = Literal["active", "paused_hil", "closed"]
 
 
 class ConversationPersistenceError(RuntimeError):
@@ -34,7 +35,7 @@ class ConversationThread:
     channel: Channel
     external_conversation_id: str
     langgraph_thread_id: str
-    status: str
+    status: ThreadStatus
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,50 @@ class ConversationRepository:
             raise ConversationPersistenceError("No fue posible resolver la conversación") from error
         if row is None:
             raise ConversationPersistenceError("No fue posible recuperar la conversación existente")
+        return ConversationThread(**row)
+
+    def get_thread(self, thread_id: UUID) -> ConversationThread:
+        try:
+            row = self._connection.execute(
+                f"""
+                SELECT id, channel, external_conversation_id, langgraph_thread_id, status
+                FROM {CONVERSATION_SCHEMA}.conversation_threads
+                WHERE id = %s
+                """,
+                (thread_id,),
+            ).fetchone()
+        except psycopg.Error as error:
+            raise ConversationPersistenceError(
+                "No fue posible consultar la conversación"
+            ) from error
+        if row is None:
+            raise ConversationPersistenceError("No se encontró la conversación")
+        return ConversationThread(**row)
+
+    def mark_thread_paused_hil(self, thread_id: UUID) -> ConversationThread:
+        """Proyecta idempotentemente una interrupción ya persistida por LangGraph."""
+        try:
+            row = self._connection.execute(
+                f"""
+                UPDATE {CONVERSATION_SCHEMA}.conversation_threads
+                SET status = 'paused_hil',
+                    updated_at = CASE
+                        WHEN status = 'paused_hil' THEN updated_at
+                        ELSE CURRENT_TIMESTAMP
+                    END
+                WHERE id = %s AND status IN ('active', 'paused_hil')
+                RETURNING id, channel, external_conversation_id, langgraph_thread_id, status
+                """,
+                (thread_id,),
+            ).fetchone()
+        except psycopg.Error as error:
+            raise ConversationPersistenceError(
+                "No fue posible pausar la conversación"
+            ) from error
+        if row is None:
+            raise ConversationPersistenceError(
+                "La conversación no admite la transición a paused_hil"
+            )
         return ConversationThread(**row)
 
     @contextmanager

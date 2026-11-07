@@ -6,14 +6,15 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid5
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from app.agent.graph import build_agent_graph, invoke_agent
 from app.agent.nodes.retrieval import Retriever
-from app.agent.state import AgentState
+from app.agent.state import AgentState, PendingToolCall
+from app.agent.tools import ToolRegistry
 from app.conversations.repository import (
     Channel,
     ConversationRepository,
@@ -30,6 +31,10 @@ class TurnRecoveryRequiredError(RuntimeError):
 
 class TurnIdempotencyConflictError(RuntimeError):
     """Un request_id existente no representa la misma solicitud de usuario."""
+
+
+class ThreadPausedError(RuntimeError):
+    """El hilo conserva una ejecución que requiere aprobación humana."""
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,14 @@ class TurnResult:
     replayed: bool
 
 
+@dataclass(frozen=True)
+class PendingApprovalResult:
+    thread: ConversationThread
+    turn_id: UUID
+    tool_call: PendingToolCall
+    replayed: bool
+
+
 class ConversationService:
     """Persiste solo los mensajes de negocio, nunca el evento interno del router."""
 
@@ -62,19 +75,22 @@ class ConversationService:
         *,
         retriever: Retriever | None = None,
         gemini_client: TextGenerator | None = None,
+        tool_registry: ToolRegistry | None = None,
         recursion_limit: int = 4,
     ) -> None:
         self._repository = repository
         self._checkpointer = checkpointer
         self._retriever = retriever
         self._gemini_client = gemini_client
+        self._tool_registry = tool_registry
         self._recursion_limit = recursion_limit
 
-    def process_user_turn(self, request: UserTurnRequest) -> TurnResult:
+    def process_user_turn(self, request: UserTurnRequest) -> TurnResult | PendingApprovalResult:
         thread = self._repository.get_or_create_thread(
             request.channel, request.external_conversation_id
         )
         with self._thread_lock(thread):
+            thread = self._repository.get_thread(thread.id)
             turn_id = uuid5(thread.id, request.request_id)
             user_key = f"user:{request.request_id}"
             agent_key = f"agent:{request.request_id}"
@@ -85,6 +101,10 @@ class ConversationService:
                 if existing_agent is not None:
                     return TurnResult(thread=thread, message=existing_agent, replayed=True)
                 return self._recover_completed_turn(thread, turn_id, agent_key)
+
+            if thread.status == "paused_hil":
+                raise ThreadPausedError("La conversación está pausada por aprobación humana")
+            self._guard_no_pending_checkpoint(thread)
 
             self._repository.store_message(
                 thread_id=thread.id,
@@ -99,9 +119,13 @@ class ConversationService:
                 retriever=self._retriever,
                 gemini_client=self._gemini_client,
                 checkpointer=self._checkpointer,
+                tool_registry=self._tool_registry,
                 thread_id=thread.langgraph_thread_id,
                 recursion_limit=self._recursion_limit,
             )
+            pending = self._pending_approval_result(thread, turn_id, replayed=False)
+            if pending is not None:
+                return pending
             answer = self._assistant_for_turn(result, str(turn_id))
             stored = self._repository.store_message(
                 thread_id=thread.id,
@@ -138,11 +162,15 @@ class ConversationService:
 
     def _recover_completed_turn(
         self, thread: ConversationThread, turn_id: UUID, agent_key: str
-    ) -> TurnResult:
+    ) -> TurnResult | PendingApprovalResult:
+        pending = self._pending_approval_result(thread, turn_id, replayed=True)
+        if pending is not None:
+            return pending
         graph = build_agent_graph(
             retriever=self._retriever,
             gemini_client=self._gemini_client,
             checkpointer=self._checkpointer,
+            tool_registry=self._tool_registry,
         )
         snapshot = graph.get_state({"configurable": {"thread_id": thread.langgraph_thread_id}})
         values = snapshot.values
@@ -161,6 +189,53 @@ class ConversationService:
             idempotency_key=agent_key,
         )
         return TurnResult(thread=thread, message=stored, replayed=True)
+
+    def _pending_approval_result(
+        self, thread: ConversationThread, turn_id: UUID, *, replayed: bool
+    ) -> PendingApprovalResult | None:
+        graph = build_agent_graph(
+            retriever=self._retriever,
+            gemini_client=self._gemini_client,
+            checkpointer=self._checkpointer,
+            tool_registry=self._tool_registry,
+        )
+        snapshot = graph.get_state({"configurable": {"thread_id": thread.langgraph_thread_id}})
+        if snapshot.next != ("critical_tools",):
+            return None
+        values = snapshot.values
+        if (
+            values.get("execution_status") != "pending_approval"
+            or values.get("turn_id") != str(turn_id)
+            or not isinstance(values.get("pending_tool_call"), dict)
+        ):
+            raise TurnRecoveryRequiredError(
+                "El checkpoint pendiente no describe una aprobación recuperable"
+            )
+        paused_thread = self._repository.mark_thread_paused_hil(thread.id)
+        return PendingApprovalResult(
+            thread=paused_thread,
+            turn_id=turn_id,
+            tool_call=cast(PendingToolCall, values["pending_tool_call"]),
+            replayed=replayed,
+        )
+
+    def _guard_no_pending_checkpoint(self, thread: ConversationThread) -> None:
+        graph = build_agent_graph(
+            retriever=self._retriever,
+            gemini_client=self._gemini_client,
+            checkpointer=self._checkpointer,
+            tool_registry=self._tool_registry,
+        )
+        snapshot = graph.get_state({"configurable": {"thread_id": thread.langgraph_thread_id}})
+        if not snapshot.next:
+            return
+        if (
+            snapshot.next == ("critical_tools",)
+            and snapshot.values.get("execution_status") == "pending_approval"
+        ):
+            self._repository.mark_thread_paused_hil(thread.id)
+            raise ThreadPausedError("La conversación está pausada por aprobación humana")
+        raise TurnRecoveryRequiredError("La conversación conserva un checkpoint pendiente")
 
     @staticmethod
     def _assistant_for_turn(state: dict[str, Any], turn_id: str) -> dict[str, Any]:
@@ -218,4 +293,8 @@ class ConversationService:
             "completed_turn_id": None,
             "answer": None,
             "error": None,
+            "execution_status": "running",
+            "tool_call": None,
+            "pending_tool_call": None,
+            "tool_result": None,
         }
