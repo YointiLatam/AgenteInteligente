@@ -23,6 +23,21 @@ class FakeGemini:
         return GeminiResult(text=next(self._responses), raw_payload={"provider": "fake"})
 
 
+class FallbackGemini:
+    def __init__(self) -> None:
+        self.fallback_attempted_inputs: list[bool] = []
+
+    def generate(self, _: str) -> GeminiResult:
+        return GeminiResult(text="reasoning", raw_payload={"provider": "fake"})
+
+    def generate_with_fallback(self, _: str, **kwargs: object) -> GeminiResult:
+        self.fallback_attempted_inputs.append(kwargs["fallback_attempted"] is True)
+        return GeminiResult(
+            text="Respuesta reforzada.",
+            raw_payload={"provider": "fake", "fallback_used": True},
+        )
+
+
 def _state(*, retrieval_requested: bool = False) -> AgentState:
     return {
         "query": "¿Cómo funciona JWT?",
@@ -65,6 +80,7 @@ def test_persistencia_asocia_estado_al_thread_id_y_se_recupera_al_reconstruir_gr
 
     assert result["answer"] == "Respuesta persistida."
     assert snapshot.values["answer"] == "Respuesta persistida."
+    assert snapshot.values["fallback_eligible"] is False
     assert snapshot.next == ()
     assert resumed["answer"] == "Respuesta persistida."
 
@@ -182,6 +198,38 @@ def test_hilo_existente_descarta_memoria_historica_recibida_y_preserva_checkpoin
         "¿Cómo funciona JWT?",
         "Siguiente consulta",
     ]
+
+
+def test_nuevo_turno_reinicia_fallback_attempted_y_permite_otro_fallback():
+    checkpointer = InMemorySaver()
+    client = FallbackGemini()
+    thread_id = "fallback-thread"
+    first = invoke_agent(
+        {
+            **_state(),
+            "query": "Compara las alternativas y justifica la decisión.",
+        },
+        gemini_client=client,  # type: ignore[arg-type]
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        recursion_limit=3,
+    )
+    snapshot = build_agent_graph(checkpointer=checkpointer).get_state(_config(thread_id))
+    second = invoke_agent(
+        {
+            **_state(),
+            "query": "Evalúa las opciones y explica los riesgos.",
+        },
+        gemini_client=client,  # type: ignore[arg-type]
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        recursion_limit=3,
+    )
+
+    assert first["fallback_attempted"] is True
+    assert snapshot.values["fallback_attempted"] is True
+    assert second["fallback_attempted"] is True
+    assert client.fallback_attempted_inputs == [False, False]
 
 
 def test_hilo_con_checkpoint_pendiente_rechaza_un_nuevo_turno():

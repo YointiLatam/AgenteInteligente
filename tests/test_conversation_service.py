@@ -44,6 +44,29 @@ class FakeGemini:
         return next(self._responses)
 
 
+class FallbackAuditGemini:
+    def __init__(self) -> None:
+        self.generate_calls = 0
+        self.fallback_calls = 0
+
+    def generate(self, _: str) -> GeminiResult:
+        self.generate_calls += 1
+        return _result("reasoning")
+
+    def generate_with_fallback(self, _: str, **__: object) -> GeminiResult:
+        self.fallback_calls += 1
+        return _result(
+            "Respuesta reforzada",
+            requested_model="gemini-3.5-flash",
+            used_model="gemini-3.8-flash",
+            fallback_used=True,
+            fallback_reason="primary_error_recoverable",
+            attempt_count=2,
+            attempts=[],
+            total_tokens=14,
+        )
+
+
 class BlockingGemini(FakeGemini):
     def __init__(self) -> None:
         super().__init__([_result("reasoning"), _result("Respuesta")])
@@ -342,6 +365,33 @@ def test_persiste_user_y_agent_sin_evento_router_y_conserva_payload():
     }
     assert messages[1].raw_payload["input_tokens"] == 4
     assert result.replayed is False
+
+
+def test_persiste_auditoria_de_fallback_y_replay_no_vuelve_a_generar():
+    repository = MemoryRepository()
+    client = FallbackAuditGemini()
+    service = ConversationService(
+        repository,
+        InMemorySaver(),
+        gemini_client=client,
+        recursion_limit=3,
+    )  # type: ignore[arg-type]
+    request = UserTurnRequest(
+        "web_widget",
+        "visitor-1",
+        "req-fallback",
+        "Compara las alternativas y justifica la decisión.",
+    )
+
+    first = service.process_user_turn(request)
+    replay = service.process_user_turn(request)
+
+    assert first.message.raw_payload["used_model"] == "gemini-3.8-flash"
+    assert first.message.raw_payload["fallback_used"] is True
+    assert first.message.raw_payload["attempt_count"] == 2
+    assert replay.replayed is True
+    assert client.generate_calls == 1
+    assert client.fallback_calls == 1
 
 
 def test_reintento_del_mismo_request_no_vuelve_a_ejecutar_el_grafo():

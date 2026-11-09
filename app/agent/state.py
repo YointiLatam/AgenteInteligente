@@ -40,6 +40,8 @@ class AgentState(TypedDict):
     query: str
     retrieval_requested: bool
     route: Literal["rag", "reasoning"] | None
+    fallback_eligible: NotRequired[bool]
+    fallback_attempted: NotRequired[bool]
     documents: list[RetrievedDocument]
     messages: list[AgentMessage]
     conversation_summary: str

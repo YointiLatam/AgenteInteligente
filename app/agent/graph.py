@@ -32,6 +32,8 @@ def _new_turn_input(state: AgentState) -> dict[str, object]:
         "query": state["query"],
         "retrieval_requested": state["retrieval_requested"],
         "route": None,
+        "fallback_eligible": False,
+        "fallback_attempted": False,
         "documents": [],
         "answer": None,
         "error": None,
