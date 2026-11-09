@@ -24,6 +24,11 @@ from app.conversations.repository import (
     ToolExecution,
 )
 from app.integrations.gemini import TextGenerator
+from app.security.content_guard import (
+    ContentGuard,
+    DeterministicContentGuard,
+    GuardDecision,
+)
 
 
 class TurnRecoveryRequiredError(RuntimeError):
@@ -32,6 +37,15 @@ class TurnRecoveryRequiredError(RuntimeError):
 
 class TurnIdempotencyConflictError(RuntimeError):
     """Un request_id existente no representa la misma solicitud de usuario."""
+
+
+class InputBlockedError(RuntimeError):
+    """La entrada fue rechazada antes de producir efectos de negocio."""
+
+    def __init__(self, public_message: str, category: str, policy_version: str) -> None:
+        super().__init__(public_message)
+        self.category = category
+        self.policy_version = policy_version
 
 
 class ThreadPausedError(RuntimeError):
@@ -112,6 +126,7 @@ class ConversationService:
         retriever: Retriever | None = None,
         gemini_client: TextGenerator | None = None,
         tool_registry: ToolRegistry | None = None,
+        content_guard: ContentGuard | None = None,
         recursion_limit: int = 4,
     ) -> None:
         self._repository = repository
@@ -119,9 +134,17 @@ class ConversationService:
         self._retriever = retriever
         self._gemini_client = gemini_client
         self._tool_registry = tool_registry
+        self._content_guard = content_guard or DeterministicContentGuard()
         self._recursion_limit = recursion_limit
 
     def process_user_turn(self, request: UserTurnRequest) -> TurnResult | PendingApprovalResult:
+        input_result = self._content_guard.validate_input(request.content)
+        if input_result.decision == GuardDecision.BLOCKED_INPUT:
+            raise InputBlockedError(
+                input_result.public_message or "Solicitud bloqueada",
+                input_result.category or "unknown",
+                input_result.policy_version,
+            )
         thread = self._repository.get_or_create_thread(
             request.channel, request.external_conversation_id
         )
@@ -516,11 +539,24 @@ class ConversationService:
             raise ThreadPausedError("La conversación está pausada por aprobación humana")
         raise TurnRecoveryRequiredError("La conversación conserva un checkpoint pendiente")
 
-    @staticmethod
-    def _assistant_for_turn(state: dict[str, Any], turn_id: str) -> dict[str, Any]:
+    def _assistant_for_turn(self, state: dict[str, Any], turn_id: str) -> dict[str, Any]:
         for message in reversed(state.get("messages", [])):
             if message.get("role") == "assistant" and message.get("turn_id") == turn_id:
-                return message
+                output_result = self._content_guard.validate_output(message["content"])
+                if output_result.decision == GuardDecision.ALLOWED:
+                    return message
+                raw_payload = {
+                    "_content_guard": {
+                        "decision": output_result.decision.value,
+                        "category": output_result.category,
+                        "policy_version": output_result.policy_version,
+                    },
+                }
+                return {
+                    **message,
+                    "content": output_result.public_message,
+                    "raw_payload": raw_payload,
+                }
         raise TurnRecoveryRequiredError("No se encontró la respuesta del turno en el checkpoint")
 
     @staticmethod
