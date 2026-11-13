@@ -1,0 +1,20 @@
+# Uso: docker compose -f docker-compose.yml -f db/compose.yml up
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: agente
+      POSTGRES_PASSWORD: agente   # solo para desarrollo local
+      POSTGRES_DB: agente
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agente"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:
