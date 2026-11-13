@@ -126,8 +126,7 @@ def test_historial_ya_resumido_no_activa_resumen_por_el_tamano_total():
 
 def test_fallo_del_resumen_no_pierde_historial_ni_reintenta_el_mismo_bloque():
     messages = [
-        _message("user" if index % 2 == 0 else "assistant", "x" * 1_200)
-        for index in range(12)
+        _message("user" if index % 2 == 0 else "assistant", "x" * 1_200) for index in range(12)
     ]
     client = FailingGemini()
 
@@ -181,8 +180,7 @@ def test_turnos_persistidos_no_sobrescriben_historial_vacio_y_se_recuperan():
 def test_resumen_se_persiste_por_thread_y_no_se_comparte():
     saver = InMemorySaver()
     messages = [
-        _message("user" if index % 2 == 0 else "assistant", "x" * 1_200)
-        for index in range(12)
+        _message("user" if index % 2 == 0 else "assistant", "x" * 1_200) for index in range(12)
     ]
 
     graph = build_agent_graph(

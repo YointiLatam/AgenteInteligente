@@ -67,9 +67,7 @@ def build_agent_graph(
     active_retriever = retriever if retriever is not None else configured_retriever
     builder.add_node("rag_retrieval", partial(rag_retrieval_node, retriever=active_retriever))
     builder.add_node("reasoning", partial(reasoning_node, gemini_client=client))
-    builder.add_node(
-        "mark_pending_approval", partial(mark_pending_approval, registry=registry)
-    )
+    builder.add_node("mark_pending_approval", partial(mark_pending_approval, registry=registry))
     builder.add_node("safe_tools", partial(safe_tools, registry=registry))
     builder.add_node("critical_tools", partial(critical_tools, registry=registry))
 

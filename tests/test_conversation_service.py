@@ -140,8 +140,7 @@ class MemoryRepository:
             (
                 execution
                 for execution in self._tool_executions.values()
-                if execution.thread_id == thread_id
-                and execution.decision_id == decision_id
+                if execution.thread_id == thread_id and execution.decision_id == decision_id
             ),
             None,
         )
@@ -179,9 +178,7 @@ class MemoryRepository:
         self._tool_executions[(thread_id, call_id)] = execution
         return execution, True
 
-    def complete_tool_execution(
-        self, execution_id: UUID, result: dict
-    ) -> ToolExecution:
+    def complete_tool_execution(self, execution_id: UUID, result: dict) -> ToolExecution:
         if self.fail_first_tool_completion:
             self.fail_first_tool_completion = False
             raise ConversationPersistenceError("tool execution write failed")
@@ -193,9 +190,7 @@ class MemoryRepository:
     def _finish_tool_execution(
         self, execution_id: UUID, status: str, result: dict
     ) -> ToolExecution:
-        execution = next(
-            item for item in self._tool_executions.values() if item.id == execution_id
-        )
+        execution = next(item for item in self._tool_executions.values() if item.id == execution_id)
         updated = replace(execution, status=status, result=result)  # type: ignore[arg-type]
         self._tool_executions[(execution.thread_id, execution.call_id)] = updated
         return updated
@@ -661,11 +656,7 @@ def test_checkpoint_hitl_reconcilia_thread_activo_antes_de_aceptar_otro_turno():
     repository = MemoryRepository()
     saver = InMemorySaver()
     registry = ToolRegistry(
-        {
-            "write": AgentTool(
-                "write", ToolEffect.DATABASE_WRITE, lambda _: {"written": True}
-            )
-        }
+        {"write": AgentTool("write", ToolEffect.DATABASE_WRITE, lambda _: {"written": True})}
     )
     thread = repository.get_or_create_thread("web_widget", "visitor-1")
     graph = build_agent_graph(
@@ -783,9 +774,7 @@ def test_aprobacion_reanuda_una_vez_registra_resultado_y_admite_replay():
     assert result.thread.status == "active"
     assert calls == [{"value": 7}]
     graph = build_agent_graph(checkpointer=saver, tool_registry=registry)
-    assert graph.get_state(
-        {"configurable": {"thread_id": thread.langgraph_thread_id}}
-    ).next == ()
+    assert graph.get_state({"configurable": {"thread_id": thread.langgraph_thread_id}}).next == ()
 
 
 def test_rechazo_finaliza_checkpoint_sin_ejecutar_handler_y_admite_replay():
@@ -808,9 +797,7 @@ def test_rechazo_finaliza_checkpoint_sin_ejecutar_handler_y_admite_replay():
         gemini_client=FakeGemini([]),
         tool_registry=registry,
     )  # type: ignore[arg-type]
-    request = _decision(
-        thread, turn_id, decision="rejected", reason="Contenido no autorizado"
-    )
+    request = _decision(thread, turn_id, decision="rejected", reason="Contenido no autorizado")
 
     result = service.decide_tool_call(request)
     replay = service.decide_tool_call(request)
@@ -828,9 +815,7 @@ def test_rechazo_de_herramienta_ya_no_registrada_sigue_siendo_seguro():
     repository = MemoryRepository()
     saver = InMemorySaver()
     registry = ToolRegistry()
-    thread, turn_id = _seed_pending_tool(
-        repository, saver, registry, tool_name="missing"
-    )
+    thread, turn_id = _seed_pending_tool(repository, saver, registry, tool_name="missing")
     service = ConversationService(
         repository,
         saver,
@@ -856,11 +841,7 @@ def test_decisiones_incompatibles_reutilizadas_o_fuera_de_orden_se_rechazan():
     repository = MemoryRepository()
     saver = InMemorySaver()
     registry = ToolRegistry(
-        {
-            "publish": AgentTool(
-                "publish", ToolEffect.EXTERNAL_WRITE, lambda _: {"published": True}
-            )
-        }
+        {"publish": AgentTool("publish", ToolEffect.EXTERNAL_WRITE, lambda _: {"published": True})}
     )
     thread, turn_id = _seed_pending_tool(repository, saver, registry)
     service = ConversationService(
@@ -886,9 +867,7 @@ def test_decisiones_incompatibles_reutilizadas_o_fuera_de_orden_se_rechazan():
             )
         )
     with pytest.raises(ToolDecisionConflictError, match="decision_id"):
-        service.decide_tool_call(
-            _decision(thread, turn_id, call_id="other-call")
-        )
+        service.decide_tool_call(_decision(thread, turn_id, call_id="other-call"))
 
 
 def test_fallo_del_handler_conserva_processing_y_no_se_reintenta():
@@ -901,9 +880,7 @@ def test_fallo_del_handler_conserva_processing_y_no_se_reintenta():
         calls += 1
         raise RuntimeError("provider unavailable")
 
-    registry = ToolRegistry(
-        {"publish": AgentTool("publish", ToolEffect.EXTERNAL_WRITE, fail)}
-    )
+    registry = ToolRegistry({"publish": AgentTool("publish", ToolEffect.EXTERNAL_WRITE, fail)})
     thread, turn_id = _seed_pending_tool(repository, saver, registry)
     service = ConversationService(
         repository,
@@ -922,9 +899,9 @@ def test_fallo_del_handler_conserva_processing_y_no_se_reintenta():
     assert execution is not None and execution.status == "processing"
     assert calls == 1
     graph = build_agent_graph(checkpointer=saver, tool_registry=registry)
-    assert graph.get_state(
-        {"configurable": {"thread_id": thread.langgraph_thread_id}}
-    ).next == ("critical_tools",)
+    assert graph.get_state({"configurable": {"thread_id": thread.langgraph_thread_id}}).next == (
+        "critical_tools",
+    )
 
 
 def test_error_de_auditoria_posterior_se_reconcilia_sin_repetir_handler():
@@ -1062,9 +1039,7 @@ def test_aprobaciones_concurrentes_ejecutan_el_handler_una_sola_vez():
         assert release.wait(timeout=5)
         return {"value": arguments["value"]}
 
-    registry = ToolRegistry(
-        {"publish": AgentTool("publish", ToolEffect.EXTERNAL_WRITE, blocking)}
-    )
+    registry = ToolRegistry({"publish": AgentTool("publish", ToolEffect.EXTERNAL_WRITE, blocking)})
     thread, turn_id = _seed_pending_tool(repository, saver, registry)
     service = ConversationService(
         repository,
@@ -1101,11 +1076,7 @@ def test_processing_pendiente_no_se_reanuda_automaticamente():
     repository = MemoryRepository()
     saver = InMemorySaver()
     registry = ToolRegistry(
-        {
-            "publish": AgentTool(
-                "publish", ToolEffect.EXTERNAL_WRITE, lambda _: {"published": True}
-            )
-        }
+        {"publish": AgentTool("publish", ToolEffect.EXTERNAL_WRITE, lambda _: {"published": True})}
     )
     thread, turn_id = _seed_pending_tool(repository, saver, registry)
     request = _decision(thread, turn_id)
@@ -1157,9 +1128,12 @@ def test_turnos_multiturno_comparten_memoria_y_canales_separan_hilos():
     repository = MemoryRepository()
     client = FakeGemini(
         [
-            _result("reasoning"), _result("Te llamas Ana."),
-            _result("reasoning"), _result("Sí, Ana."),
-            _result("reasoning"), _result("Canal distinto."),
+            _result("reasoning"),
+            _result("Te llamas Ana."),
+            _result("reasoning"),
+            _result("Sí, Ana."),
+            _result("reasoning"),
+            _result("Canal distinto."),
         ]
     )
     service = _service(repository, client)

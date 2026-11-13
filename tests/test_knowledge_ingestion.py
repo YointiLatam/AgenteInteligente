@@ -91,9 +91,7 @@ def test_ingesta_no_mezcla_modelos_existentes():
 
 
 def test_gemini_embedder_exige_y_normaliza_768_dimensiones(monkeypatch):
-    response = SimpleNamespace(
-        embeddings=[SimpleNamespace(values=[3.0, 4.0] + [0.0] * 766)]
-    )
+    response = SimpleNamespace(embeddings=[SimpleNamespace(values=[3.0, 4.0] + [0.0] * 766)])
     sdk = SimpleNamespace(models=SimpleNamespace(embed_content=lambda **_: response))
     monkeypatch.setattr("app.knowledge.ingestion.genai.Client", lambda **_: sdk)
 
@@ -105,20 +103,16 @@ def test_gemini_embedder_exige_y_normaliza_768_dimensiones(monkeypatch):
 
 
 def test_gemini_embedder_usa_retrieval_query_para_consultas(monkeypatch):
-    response = SimpleNamespace(
-        embeddings=[SimpleNamespace(values=[3.0, 4.0] + [0.0] * 766)]
-    )
+    response = SimpleNamespace(embeddings=[SimpleNamespace(values=[3.0, 4.0] + [0.0] * 766)])
     calls: list[dict] = []
     sdk = SimpleNamespace(
-        models=SimpleNamespace(
-            embed_content=lambda **kwargs: (calls.append(kwargs), response)[1]
-        )
+        models=SimpleNamespace(embed_content=lambda **kwargs: (calls.append(kwargs), response)[1])
     )
     monkeypatch.setattr("app.knowledge.ingestion.genai.Client", lambda **_: sdk)
 
-    vector = GeminiEmbedder(
-        KnowledgeSettings(_env_file=None, gemini_api_key="secret")
-    ).embed_query("consulta de prueba")
+    vector = GeminiEmbedder(KnowledgeSettings(_env_file=None, gemini_api_key="secret")).embed_query(
+        "consulta de prueba"
+    )
 
     assert len(vector) == 768
     assert vector[:2] == [0.6, 0.8]

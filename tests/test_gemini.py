@@ -267,9 +267,7 @@ def test_bloqueo_de_seguridad_no_activa_fallback(monkeypatch):
 
 
 def test_bloqueo_del_prompt_sin_candidatos_no_activa_fallback(monkeypatch):
-    responses = Responses(
-        _response("", prompt_block_reason=types.BlockedReason.SAFETY)
-    )
+    responses = Responses(_response("", prompt_block_reason=types.BlockedReason.SAFETY))
     sdk = SimpleNamespace(models=responses)
     monkeypatch.setattr("app.integrations.gemini.genai.Client", lambda **_: sdk)
 

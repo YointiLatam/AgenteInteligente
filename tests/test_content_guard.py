@@ -63,9 +63,7 @@ def test_permite_consultas_legitimas_sobre_seguridad_y_programacion(
         "Crea una plantilla genérica de instrucciones de sistema.",
     ],
 )
-def test_permite_solicitudes_educativas_genericas(
-    guard: DeterministicContentGuard, content: str
-):
+def test_permite_solicitudes_educativas_genericas(guard: DeterministicContentGuard, content: str):
     result = guard.validate_input(content)
 
     assert result.decision == GuardDecision.ALLOWED

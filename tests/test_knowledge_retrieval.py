@@ -64,18 +64,14 @@ class FakeConnection:
 
 
 def _fake_embedding_sdk() -> SimpleNamespace:
-    response = SimpleNamespace(
-        embeddings=[SimpleNamespace(values=[3.0, 4.0] + [0.0] * 766)]
-    )
+    response = SimpleNamespace(embeddings=[SimpleNamespace(values=[3.0, 4.0] + [0.0] * 766)])
     return SimpleNamespace(models=SimpleNamespace(embed_content=lambda **_: response))
 
 
 def test_recuperador_consulta_coseno_y_convierte_documentos(monkeypatch):
     cursor = FakeCursor()
     monkeypatch.setattr("app.knowledge.ingestion.genai.Client", lambda **_: _fake_embedding_sdk())
-    monkeypatch.setattr(
-        "app.knowledge.retrieval.psycopg.connect", lambda _: FakeConnection(cursor)
-    )
+    monkeypatch.setattr("app.knowledge.retrieval.psycopg.connect", lambda _: FakeConnection(cursor))
 
     documents = PostgresVectorRetriever(_settings(retrieval_top_k=3))("ficha del predio")
 
@@ -84,9 +80,7 @@ def test_recuperador_consulta_coseno_y_convierte_documentos(monkeypatch):
     assert "LIMIT %s" in cursor.statement
     assert cursor.parameters[1] == "gemini-embedding-001"
     assert cursor.parameters[3] == 3
-    assert documents == [
-        {"id": "documento:7:2", "content": "cod_ficha: F-001", "score": 0.91}
-    ]
+    assert documents == [{"id": "documento:7:2", "content": "cod_ficha: F-001", "score": 0.91}]
 
 
 def test_recuperador_rechaza_respuesta_de_embedding_con_dimension_invalida(monkeypatch):
@@ -115,9 +109,7 @@ def test_fallo_de_conexion_se_degrada_en_nodo_rag(monkeypatch):
 def test_recuperacion_valida_sin_resultados_no_agrega_error(monkeypatch):
     cursor = FakeCursor(rows=[])
     monkeypatch.setattr("app.knowledge.ingestion.genai.Client", lambda **_: _fake_embedding_sdk())
-    monkeypatch.setattr(
-        "app.knowledge.retrieval.psycopg.connect", lambda _: FakeConnection(cursor)
-    )
+    monkeypatch.setattr("app.knowledge.retrieval.psycopg.connect", lambda _: FakeConnection(cursor))
 
     update = rag_retrieval_node(_state(), PostgresVectorRetriever(_settings()))
 

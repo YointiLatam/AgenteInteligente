@@ -123,9 +123,7 @@ def prepare_memory(
         for index, message in conversation
         if index >= cursor and index not in recent_indexes
     ]
-    unsummarized_messages = [
-        message for index, message in conversation if index >= cursor
-    ]
+    unsummarized_messages = [message for index, message in conversation if index >= cursor]
     total_tokens = estimate_tokens(summary) + sum(
         estimate_tokens(message["content"]) for message in unsummarized_messages
     )
@@ -137,7 +135,8 @@ def prepare_memory(
         total_tokens <= MEMORY_TOKEN_BUDGET
         or not candidates
         or gemini_client is None
-        or failure_cursor is not None and candidate_end <= failure_cursor
+        or failure_cursor is not None
+        and candidate_end <= failure_cursor
     ):
         return updates
     try:
