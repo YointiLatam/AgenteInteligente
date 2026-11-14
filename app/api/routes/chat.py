@@ -14,8 +14,9 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
+from app.admin.repository import AdminStoreOpener, get_admin_store_opener
 from app.auth.dependencies import Settings
-from app.chat.approvals import ApprovalError, process_approval
+from app.chat.approvals import ApprovalError, authorize_approver, process_approval
 from app.chat.auth import resolve_client
 from app.chat.streaming import TokenStreamer, get_streamer
 from app.conversations.wiring import ServiceOpener, get_conversation_service_opener
@@ -68,6 +69,7 @@ async def chat_ws(
     settings: Settings,
     streamer: Streamer,
     opener: Annotated[ServiceOpener, Depends(get_conversation_service_opener)],
+    admin_opener: Annotated[AdminStoreOpener, Depends(get_admin_store_opener)],
 ) -> None:
     """Chat bidireccional: {"prompt": "..."} -> token/done/error; {"type": "approval", ...}
     -> approval_result (o error). Un frame inválido nunca cierra el socket."""
@@ -90,6 +92,7 @@ async def chat_ws(
                 frame = None
             if isinstance(frame, dict) and frame.get("type") == "approval":
                 try:
+                    await authorize_approver(admin_opener, client)
                     await websocket.send_json(await process_approval(opener, client, frame))
                 except ApprovalError as error:
                     await websocket.send_json(

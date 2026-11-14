@@ -11,6 +11,8 @@ from uuid import UUID, uuid5
 
 from pydantic import BaseModel, Field, ValidationError
 
+from app.admin.rbac import PANEL_ROLES, load_user
+from app.admin.repository import AdminStoreError, AdminStoreOpener
 from app.conversations.repository import ConversationPersistenceError
 from app.conversations.service import (
     ThreadPausedError,
@@ -71,6 +73,21 @@ def _decide(opener: ServiceOpener, request: ToolDecisionRequest) -> dict[str, An
         result = service.decide_tool_call(request)
     status = "executed" if result.execution.decision == "approved" else "rejected"
     return {"type": "approval_result", "call_id": result.execution.call_id, "status": status}
+
+
+async def authorize_approver(admin_opener: AdminStoreOpener, client: str) -> None:
+    """Only users whose database role is operator or admin may approve an action.
+
+    Same rule as the admin panel: the role is read from ``users`` on every call, so revoking it
+    takes effect immediately. A visitor's or an end user's API key can chat but never approve.
+    """
+    try:
+        user = await asyncio.to_thread(load_user, admin_opener, client)
+    except AdminStoreError as error:
+        logger.exception("No se pudo resolver el rol de quien aprueba")
+        raise ApprovalError(503, "Servicio de administración no disponible") from error
+    if user is None or user.role not in PANEL_ROLES:
+        raise ApprovalError(403, "No tienes permisos para aprobar acciones")
 
 
 async def process_approval(opener: ServiceOpener, client: str, data: Any) -> dict[str, Any]:
