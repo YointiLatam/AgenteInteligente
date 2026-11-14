@@ -102,3 +102,22 @@ offset}`; items: `{id, turn_id, role (user|agent|system|human_operator), content
 `-`; máx. 100). Orden: `created_at` descendente. Items: `{id, thread_id, turn_id, call_id,
 tool_name, decision, status, approved_by, created_at, completed_at}`. El `result` de la
 herramienta no se expone.
+
+## Panel web
+
+Interfaz estática (HTML, CSS y módulos ES, sin dependencias ni paso de build) servida por la propia
+API en `GET /admin/ui`. Los archivos están en `app/admin/static/` y se exponen solo desde una lista
+explícita en `app/api/routes/admin_ui.py` (`/admin/ui/assets/<archivo>`).
+
+- `index.html`: estructura, diálogo de confirmación y vistas. Sin scripts ni estilos en línea.
+- `admin.js` (entrada), `api.js` (fetch con JWT en memoria), `render.js` (helpers puros) y `state.js`.
+- El cascarón estático no exige autenticación; la API sigue siendo quien autoriza cada petición.
+- Cabeceras: CSP estricta (`default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; ...`),
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` y `Cache-Control: no-store` en el HTML.
+- Seguridad del cliente: la API key se canjea en `POST /auth/token` y se descarta; el JWT vive solo en
+  memoria (no `localStorage` ni cookies); todo dato dinámico se pinta con `textContent`; `401` vuelve al
+  login y `403` muestra "Sin permiso". Decidir una aprobación exige confirmar viendo herramienta y parámetros.
+- Vistas: Aprobaciones (todos los roles), Conversaciones (todos los roles) y Auditoría (solo `admin`).
+
+Pruebas: `poetry run pytest tests/test_admin_ui.py` y `node --test tests/admin_ui` (Node 20+).
+Guía de uso: `guias/administracion.md`.
