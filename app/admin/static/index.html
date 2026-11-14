@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Panel de administración</title>
+  <link rel="stylesheet" href="/admin/ui/assets/admin.css">
+  <script type="module" src="/admin/ui/assets/admin.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Saltar al contenido</a>
+  <header class="topbar">
+    <h1>Panel de administración</h1>
+    <div id="session" class="session" hidden>
+      <span id="whoami"></span>
+      <button type="button" id="logout" class="btn">Cerrar sesión</button>
+    </div>
+  </header>
+
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+
+  <main id="main" tabindex="-1">
+    <section id="view-login" aria-labelledby="login-title">
+      <h2 id="login-title">Iniciar sesión</h2>
+      <form id="login-form" autocomplete="off">
+        <label for="api-key">API key</label>
+        <input id="api-key" name="api-key" type="password" required autocomplete="off" spellcheck="false">
+        <p class="hint">La clave se canjea por un token de sesión y se descarta. No se guarda en el navegador.</p>
+        <button type="submit" class="btn primary" id="login-submit">Entrar</button>
+      </form>
+    </section>
+
+    <div id="app" hidden>
+      <nav aria-label="Secciones">
+        <ul id="tabs" class="tabs" role="list"></ul>
+      </nav>
+
+      <section id="view-approvals" aria-labelledby="approvals-title" hidden>
+        <div class="section-head">
+          <h2 id="approvals-title">Aprobaciones pendientes</h2>
+          <button type="button" id="approvals-refresh" class="btn">Actualizar</button>
+        </div>
+        <p id="approvals-empty" class="empty" hidden>No hay aprobaciones pendientes.</p>
+        <ul id="approvals-list" class="cards" role="list"></ul>
+      </section>
+
+      <section id="view-conversations" aria-labelledby="conv-title" hidden>
+        <h2 id="conv-title">Conversaciones</h2>
+        <form id="conv-filters" class="filters">
+          <div>
+            <label for="conv-channel">Canal</label>
+            <select id="conv-channel">
+              <option value="">Todos</option>
+              <option value="web_widget">Widget web</option>
+              <option value="whatsapp">WhatsApp</option>
+              <option value="meta">Meta</option>
+            </select>
+          </div>
+          <div>
+            <label for="conv-user">Usuario (id de conversación)</label>
+            <input id="conv-user" type="text" maxlength="255" autocomplete="off">
+          </div>
+          <button type="submit" class="btn primary">Filtrar</button>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <caption>Conversaciones, de la más reciente a la más antigua</caption>
+            <thead><tr>
+              <th scope="col">Canal</th><th scope="col">Usuario</th>
+              <th scope="col">Estado</th><th scope="col">Actualizada</th><th scope="col">Acción</th>
+            </tr></thead>
+            <tbody id="conv-body"></tbody>
+          </table>
+        </div>
+        <p id="conv-empty" class="empty" hidden>No hay conversaciones con esos filtros.</p>
+        <div class="pager" id="conv-pager">
+          <button type="button" class="btn" data-dir="prev">Anterior</button>
+          <span class="pager-info" aria-live="polite"></span>
+          <button type="button" class="btn" data-dir="next">Siguiente</button>
+        </div>
+      </section>
+
+      <section id="view-messages" aria-labelledby="msg-title" hidden>
+        <div class="section-head">
+          <h2 id="msg-title" tabindex="-1">Mensajes</h2>
+          <button type="button" id="messages-back" class="btn">Volver a conversaciones</button>
+        </div>
+        <ol id="messages-list" class="messages"></ol>
+        <p id="messages-empty" class="empty" hidden>Esta conversación no tiene mensajes.</p>
+        <div class="pager" id="msg-pager">
+          <button type="button" class="btn" data-dir="prev">Anterior</button>
+          <span class="pager-info" aria-live="polite"></span>
+          <button type="button" class="btn" data-dir="next">Siguiente</button>
+        </div>
+      </section>
+
+      <section id="view-audit" aria-labelledby="audit-title" hidden>
+        <h2 id="audit-title">Auditoría de herramientas</h2>
+        <form id="audit-filters" class="filters">
+          <div>
+            <label for="audit-status">Estado</label>
+            <select id="audit-status">
+              <option value="">Todos</option>
+              <option value="processing">En proceso</option>
+              <option value="completed">Completada</option>
+              <option value="failed">Fallida</option>
+            </select>
+          </div>
+          <div>
+            <label for="audit-tool">Herramienta</label>
+            <input id="audit-tool" type="text" maxlength="100" pattern="[\w.\-]+" autocomplete="off">
+          </div>
+          <button type="submit" class="btn primary">Filtrar</button>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <caption id="audit-caption">Ejecuciones de herramientas, de la más reciente a la más antigua</caption>
+            <thead><tr>
+              <th scope="col">Fecha</th><th scope="col">Herramienta</th><th scope="col">Decisión</th>
+              <th scope="col">Estado</th><th scope="col">Aprobó</th><th scope="col">Terminó</th>
+            </tr></thead>
+            <tbody id="audit-body"></tbody>
+          </table>
+        </div>
+        <p id="audit-empty" class="empty" hidden>No hay ejecuciones con esos filtros.</p>
+        <div class="pager" id="audit-pager">
+          <button type="button" class="btn" data-dir="prev">Anterior</button>
+          <span class="pager-info" aria-live="polite"></span>
+          <button type="button" class="btn" data-dir="next">Siguiente</button>
+        </div>
+      </section>
+
+      <section id="view-denied" aria-labelledby="denied-title" hidden>
+        <h2 id="denied-title" tabindex="-1">Sin permiso</h2>
+        <p>Tu rol no tiene permiso para ver esta sección.</p>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-desc">
+    <form method="dialog" id="confirm-form">
+      <h2 id="confirm-title">Confirmar decisión</h2>
+      <p id="confirm-desc"></p>
+      <dl class="details">
+        <dt>Herramienta</dt><dd id="confirm-tool"></dd>
+        <dt>Parámetros</dt><dd><pre id="confirm-params"></pre></dd>
+      </dl>
+      <label for="confirm-reason">Motivo (opcional)</label>
+      <textarea id="confirm-reason" rows="3" maxlength="1000"></textarea>
+      <p id="confirm-error" class="error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" id="confirm-cancel" class="btn">Cancelar</button>
+        <button type="submit" id="confirm-ok" class="btn primary">Confirmar</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
