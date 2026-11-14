@@ -1,0 +1,183 @@
+name: Deploy
+
+# Staging: automatic after CI succeeds on main.
+# Production: manual only, promotes an image already built for a commit that passed CI.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit SHA completo (ya desplegado en staging) a promover a produccion"
+        required: true
+        type: string
+      ci_run_id:
+        description: "ID de la ejecucion de CI de ese commit (para descargar el widget)"
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-${{ github.event_name == 'workflow_dispatch' && 'production' || 'staging' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  actions: read
+
+jobs:
+  deploy:
+    name: deploy
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'production' || 'staging' }}
+    env:
+      TARGET_ENV: ${{ github.event_name == 'workflow_dispatch' && 'production' || 'staging' }}
+      DEPLOY_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.sha || github.event.workflow_run.head_sha }}
+      CI_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.ci_run_id || github.event.workflow_run.id }}
+      SSH_HOST: ${{ secrets.HOSTINGER_SSH_HOST }}
+      SSH_USER: ${{ secrets.HOSTINGER_SSH_USER }}
+    steps:
+      - name: Validar SHA
+        run: |
+          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::SHA invalido"; exit 1; }
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::ci_run_id invalido"; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Calcular nombre de la imagen
+        run: |
+          echo "API_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${DEPLOY_SHA}" >> "$GITHUB_ENV"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Staging builds and pushes. Production reuses the exact image already tested in staging.
+      - name: Construir y publicar imagen (staging)
+        if: env.TARGET_ENV == 'staging'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.API_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verificar que la imagen existe (produccion)
+        if: env.TARGET_ENV == 'production'
+        run: docker buildx imagetools inspect "$API_IMAGE" > /dev/null
+
+      - name: Descargar artefacto del widget
+        id: widget
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: widget-dist
+          path: widget-dist
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Preparar SSH
+        env:
+          SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.HOSTINGER_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          {
+            echo "Host deploy-target"
+            echo "  HostName $SSH_HOST"
+            echo "  User $SSH_USER"
+            echo "  IdentityFile $HOME/.ssh/deploy_key"
+            echo "  IdentitiesOnly yes"
+            echo "  StrictHostKeyChecking yes"
+            echo "  UserKnownHostsFile $HOME/.ssh/known_hosts"
+          } > "$HOME/.ssh/config"
+
+      - name: Copiar deploy/ y el widget al VPS
+        run: |
+          DEPLOY_DIR="/opt/agente/${TARGET_ENV}"
+          ssh deploy-target "mkdir -p '$DEPLOY_DIR/widget' '$DEPLOY_DIR/.deploy'"
+          scp -r deploy/. "deploy-target:$DEPLOY_DIR/"
+          if [ "${{ steps.widget.outcome }}" = "success" ] && [ -d widget-dist ]; then
+            scp -r widget-dist/. "deploy-target:$DEPLOY_DIR/widget/"
+          else
+            echo "::warning::Sin artefacto del widget: se conserva el que ya esta en el servidor."
+          fi
+
+      - name: Escribir .env en el servidor
+        env:
+          API_DOMAIN: ${{ secrets.API_DOMAIN }}
+          WIDGET_DOMAIN: ${{ secrets.WIDGET_DOMAIN }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          AUTH_JWT_SECRET: ${{ secrets.AUTH_JWT_SECRET }}
+          AUTH_API_KEYS: ${{ secrets.AUTH_API_KEYS }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          WHATSAPP_ACCESS_TOKEN: ${{ secrets.WHATSAPP_ACCESS_TOKEN }}
+          WHATSAPP_PHONE_NUMBER_ID: ${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+          X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
+          X_CLIENT_SECRET: ${{ secrets.X_CLIENT_SECRET }}
+          X_REFRESH_TOKEN: ${{ secrets.X_REFRESH_TOKEN }}
+          X_USER_ID: ${{ secrets.X_USER_ID }}
+          META_APP_ID: ${{ secrets.META_APP_ID }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+          TOKEN_ENCRYPTION_KEY: ${{ secrets.TOKEN_ENCRYPTION_KEY }}
+          WHATSAPP_VERIFY_TOKEN: ${{ secrets.WHATSAPP_VERIFY_TOKEN }}
+          WHATSAPP_APP_SECRET: ${{ secrets.WHATSAPP_APP_SECRET }}
+          CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS }}
+          INTEGRATIONS_SANDBOX: ${{ vars.INTEGRATIONS_SANDBOX || 'true' }}
+        run: |
+          set +x
+          emit() {
+            case "${!1}" in
+              *\'*|*$'\n'*) echo "::error::Valor invalido para $1 (comilla simple o salto de linea)"; exit 1 ;;
+            esac
+            printf "%s='%s'\n" "$1" "${!1}"
+          }
+          DEPLOY_DIR="/opt/agente/${TARGET_ENV}"
+          {
+            for name in API_DOMAIN WIDGET_DOMAIN POSTGRES_PASSWORD DATABASE_URL \
+                        AUTH_JWT_SECRET AUTH_API_KEYS GEMINI_API_KEY META_ACCESS_TOKEN \
+                        WHATSAPP_ACCESS_TOKEN WHATSAPP_PHONE_NUMBER_ID X_BEARER_TOKEN \
+                        X_CLIENT_ID X_CLIENT_SECRET X_REFRESH_TOKEN X_USER_ID \
+                        META_APP_ID META_APP_SECRET TOKEN_ENCRYPTION_KEY \
+                        WHATSAPP_VERIFY_TOKEN WHATSAPP_APP_SECRET CORS_ALLOWED_ORIGINS \
+                        INTEGRATIONS_SANDBOX; do
+              emit "$name"
+            done
+            echo "POSTGRES_USER='agente'"
+            echo "POSTGRES_DB='agente'"
+            echo "REDIS_URL='redis://redis:6379/0'"
+          } | ssh deploy-target "umask 077 && cat > '$DEPLOY_DIR/.env.tmp' && mv '$DEPLOY_DIR/.env.tmp' '$DEPLOY_DIR/.env'"
+
+      - name: Login a ghcr.io en el servidor
+        env:
+          GHCR_PULL_USER: ${{ secrets.GHCR_PULL_USER }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_PULL_TOKEN" | ssh deploy-target "docker login ghcr.io -u '$GHCR_PULL_USER' --password-stdin"
+
+      - name: Desplegar
+        run: |
+          DEPLOY_DIR="/opt/agente/${TARGET_ENV}"
+          ssh deploy-target "cd '$DEPLOY_DIR' && bash scripts/remote-deploy.sh deploy '$API_IMAGE'"
+
+      - name: Limpiar llaves
+        if: always()
+        run: rm -rf "$HOME/.ssh" widget-dist
