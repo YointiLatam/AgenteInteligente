@@ -88,7 +88,22 @@ jobs:
           run-id: ${{ env.CI_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Comprobar el destino de despliegue
+        id: destino
+        env:
+          SSH_HOST: ${{ secrets.HOSTINGER_SSH_HOST }}
+        run: |
+          if [ -n "$SSH_HOST" ]; then
+            echo "listo=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "::error::Falta el secreto HOSTINGER_SSH_HOST del entorno ${TARGET_ENV}."
+            exit 1
+          else
+            echo "listo=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Sin secretos de Hostinger: se publica la imagen pero se omite el despliegue."
+          fi
       - name: Preparar SSH
+        if: steps.destino.outputs.listo == 'true'
         env:
           SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
           SSH_KNOWN_HOSTS: ${{ secrets.HOSTINGER_SSH_KNOWN_HOSTS }}
@@ -108,6 +123,7 @@ jobs:
           } > "$HOME/.ssh/config"
 
       - name: Copiar deploy/ y el widget al VPS
+        if: steps.destino.outputs.listo == 'true'
         run: |
           DEPLOY_DIR="/opt/agente/${TARGET_ENV}"
           ssh deploy-target "mkdir -p '$DEPLOY_DIR/widget' '$DEPLOY_DIR/.deploy'"
@@ -119,6 +135,7 @@ jobs:
           fi
 
       - name: Escribir .env en el servidor
+        if: steps.destino.outputs.listo == 'true'
         env:
           API_DOMAIN: ${{ secrets.API_DOMAIN }}
           WIDGET_DOMAIN: ${{ secrets.WIDGET_DOMAIN }}
@@ -167,6 +184,7 @@ jobs:
           } | ssh deploy-target "umask 077 && cat > '$DEPLOY_DIR/.env.tmp' && mv '$DEPLOY_DIR/.env.tmp' '$DEPLOY_DIR/.env'"
 
       - name: Login a ghcr.io en el servidor
+        if: steps.destino.outputs.listo == 'true'
         env:
           GHCR_PULL_USER: ${{ secrets.GHCR_PULL_USER }}
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
@@ -174,10 +192,11 @@ jobs:
           printf '%s' "$GHCR_PULL_TOKEN" | ssh deploy-target "docker login ghcr.io -u '$GHCR_PULL_USER' --password-stdin"
 
       - name: Desplegar
+        if: steps.destino.outputs.listo == 'true'
         run: |
           DEPLOY_DIR="/opt/agente/${TARGET_ENV}"
           ssh deploy-target "cd '$DEPLOY_DIR' && bash scripts/remote-deploy.sh deploy '$API_IMAGE'"
 
       - name: Limpiar llaves
-        if: always()
+        if: always() && steps.destino.outputs.listo == 'true'
         run: rm -rf "$HOME/.ssh" widget-dist
