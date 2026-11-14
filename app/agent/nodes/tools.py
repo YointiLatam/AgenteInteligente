@@ -26,9 +26,7 @@ def route_after_reasoning(state: AgentState, *, registry: ToolRegistry) -> ToolR
     return "safe_tools"
 
 
-def mark_pending_approval(
-    state: AgentState, *, registry: ToolRegistry
-) -> dict[str, object]:
+def mark_pending_approval(state: AgentState, *, registry: ToolRegistry) -> dict[str, object]:
     call = _tool_call(state)
     tool = registry.get(call["tool_name"])
     effect: Literal["external_write", "database_write", "unknown"]

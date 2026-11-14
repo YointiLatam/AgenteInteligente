@@ -65,9 +65,7 @@ class DeterministicContentGuard:
         r"ejecuta|autoriza|ignore|bypass|reveal|show|execute|authorize)\b",
         re.IGNORECASE,
     )
-    _PRIVATE_KEY = re.compile(
-        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE
-    )
+    _PRIVATE_KEY = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE)
     _SECRET_ASSIGNMENT = re.compile(
         r"\b(?:gemini_api_key|auth_jwt_secret|database_url|neon_database_url|"
         r"whatsapp_access_token|meta_access_token|x_bearer_token)\b\s*[:=]\s*"

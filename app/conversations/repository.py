@@ -138,9 +138,7 @@ class ConversationRepository:
                 (thread_id,),
             ).fetchone()
         except psycopg.Error as error:
-            raise ConversationPersistenceError(
-                "No fue posible pausar la conversación"
-            ) from error
+            raise ConversationPersistenceError("No fue posible pausar la conversación") from error
         if row is None:
             raise ConversationPersistenceError(
                 "La conversación no admite la transición a paused_hil"
@@ -168,9 +166,7 @@ class ConversationRepository:
                 "No fue posible reactivar la conversación"
             ) from error
         if row is None:
-            raise ConversationPersistenceError(
-                "La conversación no admite la transición a active"
-            )
+            raise ConversationPersistenceError("La conversación no admite la transición a active")
         return ConversationThread(**row)
 
     def get_tool_execution(self, thread_id: UUID, call_id: str) -> ToolExecution | None:
@@ -233,14 +229,10 @@ class ConversationRepository:
             return existing, False
         raise ConversationPersistenceError("No fue posible confirmar la ejecución registrada")
 
-    def complete_tool_execution(
-        self, execution_id: UUID, result: dict[str, Any]
-    ) -> ToolExecution:
+    def complete_tool_execution(self, execution_id: UUID, result: dict[str, Any]) -> ToolExecution:
         return self._finish_tool_execution(execution_id, "completed", result)
 
-    def fail_tool_execution(
-        self, execution_id: UUID, result: dict[str, Any]
-    ) -> ToolExecution:
+    def fail_tool_execution(self, execution_id: UUID, result: dict[str, Any]) -> ToolExecution:
         return self._finish_tool_execution(execution_id, "failed", result)
 
     def _find_tool_execution(

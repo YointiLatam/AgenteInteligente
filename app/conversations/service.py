@@ -227,9 +227,7 @@ class ConversationService:
             existing = self._repository.get_tool_execution(thread.id, request.call_id)
             if existing is not None:
                 return self._replay_tool_decision(thread, existing, request)
-            reused = self._repository.get_tool_execution_by_decision(
-                thread.id, request.decision_id
-            )
+            reused = self._repository.get_tool_execution_by_decision(thread.id, request.decision_id)
             if reused is not None:
                 raise ToolDecisionConflictError(
                     "decision_id ya pertenece a otra llamada de herramienta"
@@ -337,9 +335,7 @@ class ConversationService:
             raise ToolExecutionUncertainError(
                 "La resolución no pudo confirmarse; la ejecución permanece processing"
             ) from error
-        return ToolDecisionResult(
-            thread=active_thread, execution=completed, replayed=False
-        )
+        return ToolDecisionResult(thread=active_thread, execution=completed, replayed=False)
 
     def _replay_tool_decision(
         self,
@@ -352,9 +348,7 @@ class ConversationService:
             raise ToolExecutionFailedError("La ejecución crítica ya terminó con un fallo")
         if execution.status == "completed":
             active_thread = self._repository.mark_thread_active(thread.id)
-            return ToolDecisionResult(
-                thread=active_thread, execution=execution, replayed=True
-            )
+            return ToolDecisionResult(thread=active_thread, execution=execution, replayed=True)
 
         graph = self._build_graph()
         config = self._graph_config(thread)
@@ -363,9 +357,7 @@ class ConversationService:
             result = self._completed_tool_result(graph, config, request.turn_id)
             completed = self._repository.complete_tool_execution(execution.id, result)
             active_thread = self._repository.mark_thread_active(thread.id)
-            return ToolDecisionResult(
-                thread=active_thread, execution=completed, replayed=True
-            )
+            return ToolDecisionResult(thread=active_thread, execution=completed, replayed=True)
         raise ToolExecutionUncertainError(
             "La ejecución permanece processing y no se repetirá automáticamente"
         )
@@ -409,19 +401,13 @@ class ConversationService:
             or pending.get("tool_name") != request.tool_name
             or not isinstance(pending.get("arguments"), dict)
         ):
-            raise ToolDecisionOutOfOrderError(
-                "La decisión no corresponde al checkpoint pendiente"
-            )
+            raise ToolDecisionOutOfOrderError("La decisión no corresponde al checkpoint pendiente")
         return cast(PendingToolCall, pending)
 
     def _validate_approved_tool(self, pending: PendingToolCall) -> None:
         registry = self._tool_registry
         tool = registry.get(pending["tool_name"]) if registry is not None else None
-        if (
-            tool is None
-            or tool.effect == ToolEffect.READ
-            or tool.effect.value != pending["effect"]
-        ):
+        if tool is None or tool.effect == ToolEffect.READ or tool.effect.value != pending["effect"]:
             raise ToolDecisionConflictError(
                 "La herramienta pendiente ya no conserva su clasificación crítica"
             )
@@ -439,16 +425,13 @@ class ConversationService:
             or execution.decision_id != request.decision_id
             or execution.decision != request.decision
             or execution.approved_by != request.approved_by
-            or request.decision == "rejected" and expected_reason != request.reason
+            or request.decision == "rejected"
+            and expected_reason != request.reason
         ):
-            raise ToolDecisionConflictError(
-                "La llamada ya tiene una decisión incompatible"
-            )
+            raise ToolDecisionConflictError("La llamada ya tiene una decisión incompatible")
 
     @staticmethod
-    def _completed_tool_result(
-        graph: Any, config: dict[str, Any], turn_id: UUID
-    ) -> dict[str, Any]:
+    def _completed_tool_result(graph: Any, config: dict[str, Any], turn_id: UUID) -> dict[str, Any]:
         snapshot = graph.get_state(config)
         result = snapshot.values.get("tool_result")
         if (
@@ -457,9 +440,7 @@ class ConversationService:
             or snapshot.values.get("completed_turn_id") != str(turn_id)
             or not isinstance(result, dict)
         ):
-            raise ToolExecutionFailedError(
-                "El checkpoint no finalizó la ejecución esperada"
-            )
+            raise ToolExecutionFailedError("El checkpoint no finalizó la ejecución esperada")
         return result
 
     def _recover_completed_turn(

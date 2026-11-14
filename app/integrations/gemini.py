@@ -119,9 +119,7 @@ class GeminiClient:
                 ) from error
             fallback_reason = "primary_error_recoverable"
 
-        if not self._can_fallback(
-            fallback_eligible, fallback_attempted, estimated_input_tokens
-        ):
+        if not self._can_fallback(fallback_eligible, fallback_attempted, estimated_input_tokens):
             raise GeminiGenerationError(
                 self._audit_payload(
                     attempts,
@@ -175,9 +173,7 @@ class GeminiClient:
         started = perf_counter()
         arguments: dict[str, Any] = {"model": model, "contents": prompt}
         if max_output_tokens is not None:
-            arguments["config"] = types.GenerateContentConfig(
-                max_output_tokens=max_output_tokens
-            )
+            arguments["config"] = types.GenerateContentConfig(max_output_tokens=max_output_tokens)
         response = self._client.models.generate_content(**arguments)
         latency_ms = round((perf_counter() - started) * 1000)
         usage = response.usage_metadata
@@ -209,16 +205,13 @@ class GeminiClient:
 
     @staticmethod
     def _is_usable(result: GeminiResult) -> bool:
-        return bool(
-            result.text.strip() and result.raw_payload.get("finish_reason") != "MAX_TOKENS"
-        )
+        return bool(result.text.strip() and result.raw_payload.get("finish_reason") != "MAX_TOKENS")
 
     @staticmethod
     def _is_explicitly_blocked(result: GeminiResult) -> bool:
         finish_reason = result.raw_payload.get("finish_reason")
         return (
-            isinstance(finish_reason, str)
-            and finish_reason.upper() in _SAFETY_FINISH_REASONS
+            isinstance(finish_reason, str) and finish_reason.upper() in _SAFETY_FINISH_REASONS
         ) or result.raw_payload.get("prompt_block_reason") is not None
 
     @staticmethod
