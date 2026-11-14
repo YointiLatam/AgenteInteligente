@@ -76,6 +76,7 @@ export function approvalErrorMessage(status) {
   if (status === 409) return 'La acción ya no está pendiente de aprobación.';
   if (status === 404) return 'No se encontró la acción pendiente.';
   if (status === 401) return 'Tu sesión no es válida. Recarga la página.';
+  if (status === 403) return 'No tienes permiso para aprobar acciones.';
   if (status === 422) return 'La decisión no es válida.';
   if (status === 503) return 'El servicio de aprobación no está disponible ahora.';
   return 'No se pudo enviar la decisión. Intenta de nuevo.';
