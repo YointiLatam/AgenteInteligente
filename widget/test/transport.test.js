@@ -104,3 +104,8 @@ test('sendApproval reports a 409 with a specific message', async () => {
   assert.deepEqual(messages, [{ type: 'error', message: approvalErrorMessage(409) }]);
   assert.notEqual(approvalErrorMessage(409), approvalErrorMessage(500));
 });
+
+test('a 403 explains the missing permission instead of the generic failure', () => {
+  assert.match(approvalErrorMessage(403), /permiso/);
+  assert.notEqual(approvalErrorMessage(403), approvalErrorMessage(500));
+});

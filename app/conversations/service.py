@@ -594,3 +594,26 @@ class ConversationService:
             "pending_tool_call": None,
             "tool_result": None,
         }
+
+    def read_pending_approval(self, thread_id: UUID) -> dict[str, Any] | None:
+        """Read-only: the pending HITL call of a thread's checkpoint, or None if there is none."""
+        thread = self._repository.get_thread(thread_id)
+        snapshot = self._build_graph().get_state(self._graph_config(thread))
+        values = snapshot.values
+        pending = values.get("pending_tool_call")
+        if (
+            snapshot.next != ("critical_tools",)
+            or values.get("execution_status") != "pending_approval"
+            or not isinstance(values.get("turn_id"), str)
+            or not isinstance(pending, dict)
+            or not isinstance(pending.get("call_id"), str)
+            or not isinstance(pending.get("tool_name"), str)
+            or not isinstance(pending.get("arguments"), dict)
+        ):
+            return None
+        return {
+            "turn_id": values["turn_id"],
+            "call_id": pending["call_id"],
+            "tool_name": pending["tool_name"],
+            "parameters": pending["arguments"],
+        }

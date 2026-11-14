@@ -40,6 +40,8 @@ Se emite por WebSocket, o como `event: approval_required` en el stream SSE, cuan
 {"type":"approval","thread_id":"<uuid>","turn_id":"<uuid>","call_id":"<str>","tool_name":"<str>","decision":"approved","reason":"opcional"}
 ```
 
+**Quién puede aprobar:** solo el cliente autenticado cuyo `users.role` sea `operator` o `admin` (se lee de la base en cada decisión). Con otro rol, o si el cliente no existe en `users`, la decisión se rechaza con `403` (HTTP) o con un frame `error` con `status: 403` (WebSocket, el socket sigue abierto). Por eso el modal solo es útil en un widget cuya API key pertenece a personal autorizado, no en el widget público de los visitantes.
+
 El cliente devuelve tal cual `thread_id`, `turn_id`, `call_id` y `tool_name` del frame `approval_required`. `decision` es `approved` o `rejected`; `reason` es opcional (máx. 1000 caracteres). `decision_id` es opcional: si falta, el servidor deriva uno estable de `thread_id`, `call_id` y `decision`, de modo que repetir el mismo mensaje es inofensivo (idempotente). El aprobador (`approved_by`) es siempre el cliente autenticado; cualquier `approved_by` del cuerpo se ignora.
 
 En WebSocket se envía por el mismo socket. En modo SSE se envía `POST /chat/approval` con el mismo cuerpo JSON y las mismas cabeceras de autenticación (`X-API-Key` o `Authorization`).
@@ -57,6 +59,7 @@ En WebSocket se envía por el mismo socket. En modo SSE se envía `POST /chat/ap
 | Situación | HTTP (`POST /chat/approval`) | WebSocket |
 | --- | --- | --- |
 | Sin credenciales o inválidas | 401 | cierre 1008 al conectar |
+| El cliente no tiene rol `operator` ni `admin` en `users` | 403 | `status: 403` |
 | Cuerpo mal formado, `decision` inválida, ids no UUID | 422 | `{"type":"error","message":"...","status":422}` |
 | Hilo inexistente | 404 | `status: 404` |
 | Acción no pendiente, ya decidida de otro modo, o ejecución sin confirmar | 409 | `status: 409` |
