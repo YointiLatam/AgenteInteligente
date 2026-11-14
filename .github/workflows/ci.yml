@@ -45,6 +45,14 @@ jobs:
             echo "present=false" >> "$GITHUB_OUTPUT"
             echo "::notice::widget/package.json no existe: se omite el job del widget."
           fi
+          # El custom element llega en un PR posterior de la serie del widget: hasta entonces
+          # no hay punto de entrada que empaquetar y se omiten el build y el artefacto.
+          if [ -f widget/src/ai-chat-agent.js ]; then
+            echo "entry=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "entry=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::widget/src/ai-chat-agent.js no existe todavía: se omite el build."
+          fi
       - uses: actions/setup-node@v4
         if: steps.detect.outputs.present == 'true'
         with:
@@ -64,11 +72,11 @@ jobs:
         working-directory: widget
         run: npm test
       - name: Build
-        if: steps.detect.outputs.present == 'true'
+        if: steps.detect.outputs.present == 'true' && steps.detect.outputs.entry == 'true'
         working-directory: widget
         run: npm run build
       - name: Publicar artefacto del widget
-        if: steps.detect.outputs.present == 'true'
+        if: steps.detect.outputs.present == 'true' && steps.detect.outputs.entry == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: widget-dist
