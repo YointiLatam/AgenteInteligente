@@ -29,3 +29,8 @@ curl http://localhost:8000/health
 - Cada archivo de `app/api/routes/` que exponga un `router` se registra automáticamente.
 - Commits en español con [Conventional Commits](https://www.conventionalcommits.org/es/).
 - Pull requests pequeños (menos de 400 líneas) y encadenados.
+
+## Documentación
+
+- [Referencia técnica de la API](guias/api.md)
+- [Guía de integración del widget](guias/integracion-widget.md)
