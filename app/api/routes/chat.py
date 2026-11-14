@@ -15,8 +15,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from app.auth.dependencies import Settings
+from app.chat.approvals import ApprovalError, process_approval
 from app.chat.auth import resolve_client
 from app.chat.streaming import TokenStreamer, get_streamer
+from app.conversations.wiring import ServiceOpener, get_conversation_service_opener
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -61,8 +63,14 @@ async def stream_sse(
 
 
 @router.websocket("/ws")
-async def chat_ws(websocket: WebSocket, settings: Settings, streamer: Streamer) -> None:
-    """Chat bidireccional: el cliente envía {"prompt": "..."} y recibe token/done/error."""
+async def chat_ws(
+    websocket: WebSocket,
+    settings: Settings,
+    streamer: Streamer,
+    opener: Annotated[ServiceOpener, Depends(get_conversation_service_opener)],
+) -> None:
+    """Chat bidireccional: {"prompt": "..."} -> token/done/error; {"type": "approval", ...}
+    -> approval_result (o error). Un frame inválido nunca cierra el socket."""
     client = resolve_client(
         settings,
         authorization=websocket.headers.get("authorization"),
@@ -75,8 +83,21 @@ async def chat_ws(websocket: WebSocket, settings: Settings, streamer: Streamer) 
     await websocket.accept()
     try:
         while True:
+            raw = await websocket.receive_text()
             try:
-                prompt = PromptIn.model_validate_json(await websocket.receive_text()).prompt
+                frame = json.loads(raw)
+            except ValueError:
+                frame = None
+            if isinstance(frame, dict) and frame.get("type") == "approval":
+                try:
+                    await websocket.send_json(await process_approval(opener, client, frame))
+                except ApprovalError as error:
+                    await websocket.send_json(
+                        {"type": "error", "message": error.message, "status": error.status_code}
+                    )
+                continue
+            try:
+                prompt = PromptIn.model_validate_json(raw).prompt
             except ValidationError:
                 await websocket.send_json(
                     {"type": "error", "message": 'Se espera {"prompt": "..."}'}
