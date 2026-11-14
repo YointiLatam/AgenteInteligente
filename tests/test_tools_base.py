@@ -35,8 +35,13 @@ class CriticalTool(EchoTool):
     critical = True
 
 
+async def _no_sleep(seconds: float) -> None:
+    return None
+
+
 def _tool(cls=EchoTool, **kwargs):
     sink = InMemoryAuditSink()
+    kwargs.setdefault("sleep", _no_sleep)
     return cls(audit=sink, **kwargs), sink
 
 
@@ -120,3 +125,39 @@ async def test_si_falla_la_auditoria_el_resultado_se_entrega():
     result = await EchoTool(audit=BrokenSink()).run({"text": "hola"})
 
     assert result.status == ToolStatus.EXECUTED
+
+
+async def test_sin_reintentos_el_resultado_y_la_auditoria_no_cambian():
+    ok_tool, ok_sink = _tool()
+    bad_tool, bad_sink = _tool(behavior=ToolError("not_found", "Pedido inexistente"))
+
+    ok = await ok_tool.run({"text": "hola"})
+    bad = await bad_tool.run({"text": "x"})
+
+    assert ok.model_dump() == {"status": "executed", "data": {"echo": "hola"}, "error": None}
+    assert bad.error.model_dump() == {
+        "code": "not_found",
+        "message": "Pedido inexistente",
+        "retryable": False,
+    }
+    assert ok_sink.entries[0].output_result == {"echo": "hola"}
+    assert bad_sink.entries[0].output_result == {"error": bad.error.model_dump()}
+
+
+async def test_la_espera_entre_reintentos_usa_el_sleep_inyectado_y_se_audita():
+    waits = []
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+
+    request = httpx.Request("GET", "https://api.test")
+    error = httpx.HTTPStatusError("x", request=request, response=httpx.Response(503))
+    tool, sink = _tool(behavior=error, sleep=fake_sleep)
+
+    result = await tool.run({"text": "x"})
+
+    assert result.status == ToolStatus.FAILED
+    assert len(waits) == 2
+    assert [r["wait_seconds"] for r in sink.entries[0].output_result["retries"]] == [
+        round(w, 3) for w in waits
+    ]

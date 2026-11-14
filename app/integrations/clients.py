@@ -4,13 +4,21 @@ import httpx
 
 from app.integrations.settings import IntegrationsSettings
 
-TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+TIMEOUT = httpx.Timeout(10.0, connect=5.0)  # generic default, kept for compatibility
 
 
 class Provider(StrEnum):
     META = "meta"
     WHATSAPP = "whatsapp"
     X = "x"
+
+
+# Explicit per-provider timeouts (seconds). Sends are given more room to write/read.
+PROVIDER_TIMEOUTS: dict[Provider, httpx.Timeout] = {
+    Provider.META: httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0),
+    Provider.WHATSAPP: httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=5.0),
+    Provider.X: httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0),
+}
 
 
 class ProviderNotConfigured(RuntimeError):
@@ -36,11 +44,18 @@ def is_configured(provider: Provider, settings: IntegrationsSettings) -> bool:
     return _credentials(provider, settings) is not None
 
 
-def build_client(provider: Provider, settings: IntegrationsSettings) -> httpx.AsyncClient:
+def build_client(
+    provider: Provider,
+    settings: IntegrationsSettings,
+    timeout: httpx.Timeout | None = None,
+) -> httpx.AsyncClient:
+    """Build the provider client with per-provider timeouts (or an explicit override)."""
     credentials = _credentials(provider, settings)
     if credentials is None:
         raise ProviderNotConfigured(f"Faltan credenciales para '{provider.value}'")
     base_url, token = credentials
     return httpx.AsyncClient(
-        base_url=base_url, timeout=TIMEOUT, headers={"Authorization": f"Bearer {token}"}
+        base_url=base_url,
+        timeout=timeout or PROVIDER_TIMEOUTS.get(provider, TIMEOUT),
+        headers={"Authorization": f"Bearer {token}"},
     )
