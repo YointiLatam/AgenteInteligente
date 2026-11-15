@@ -8,6 +8,7 @@ from google import genai
 from google.genai import types
 
 from app.integrations.settings import IntegrationsSettings
+from app.observability.telemetry import get_telemetry
 
 GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_FALLBACK_MODEL = "gemini-3.8-flash"
@@ -133,6 +134,7 @@ class GeminiClient:
                 prompt,
                 self._fallback_model,
                 max_output_tokens=self._fallback_max_output_tokens,
+                fallback_used=True,
             )
             if not self._is_usable(fallback):
                 attempts.append(self._attempt_payload(fallback.raw_payload, "unusable"))
@@ -168,29 +170,75 @@ class GeminiClient:
         )
 
     def _generate_model(
-        self, prompt: str, model: str, *, max_output_tokens: int | None = None
+        self,
+        prompt: str,
+        model: str,
+        *,
+        max_output_tokens: int | None = None,
+        fallback_used: bool = False,
     ) -> GeminiResult:
-        started = perf_counter()
-        arguments: dict[str, Any] = {"model": model, "contents": prompt}
-        if max_output_tokens is not None:
-            arguments["config"] = types.GenerateContentConfig(max_output_tokens=max_output_tokens)
-        response = self._client.models.generate_content(**arguments)
-        latency_ms = round((perf_counter() - started) * 1000)
-        usage = response.usage_metadata
-        raw_payload = {
-            "provider": "gemini",
-            "model": getattr(response, "model_version", None) or model,
-            "requested_model": model,
-            "input_tokens": getattr(usage, "prompt_token_count", None),
-            "output_tokens": getattr(usage, "candidates_token_count", None),
-            "total_tokens": getattr(usage, "total_token_count", None),
-            "thinking_tokens": getattr(usage, "thoughts_token_count", None),
-            "cached_tokens": getattr(usage, "cached_content_token_count", None),
-            "finish_reason": self._finish_reason(response),
-            "prompt_block_reason": self._prompt_block_reason(response),
-            "latency_ms": latency_ms,
-        }
-        return GeminiResult(text=response.text or "", raw_payload=raw_payload)
+        telemetry = get_telemetry()
+        with telemetry.observation(
+            "gemini.generate",
+            as_type="generation",
+            metadata={"requested_model": model, "fallback_used": fallback_used},
+            model=model,
+        ) as span:
+            started = perf_counter()
+            arguments: dict[str, Any] = {"model": model, "contents": prompt}
+            if max_output_tokens is not None:
+                arguments["config"] = types.GenerateContentConfig(
+                    max_output_tokens=max_output_tokens
+                )
+            response = self._client.models.generate_content(**arguments)
+            latency_ms = round((perf_counter() - started) * 1000)
+            usage = response.usage_metadata
+            raw_payload = {
+                "provider": "gemini",
+                "model": getattr(response, "model_version", None) or model,
+                "requested_model": model,
+                "input_tokens": getattr(usage, "prompt_token_count", None),
+                "output_tokens": getattr(usage, "candidates_token_count", None),
+                "total_tokens": getattr(usage, "total_token_count", None),
+                "thinking_tokens": getattr(usage, "thoughts_token_count", None),
+                "cached_tokens": getattr(usage, "cached_content_token_count", None),
+                "finish_reason": self._finish_reason(response),
+                "prompt_block_reason": self._prompt_block_reason(response),
+                "latency_ms": latency_ms,
+            }
+            result = GeminiResult(text=response.text or "", raw_payload=raw_payload)
+            cost_details, cost_metadata = telemetry.gemini_cost(
+                raw_payload["model"], raw_payload["input_tokens"], raw_payload["output_tokens"]
+            )
+            telemetry.update(
+                span,
+                {
+                    "outcome": self._generation_outcome(result),
+                    "fallback_used": fallback_used,
+                    "used_model": raw_payload["model"],
+                    "input_tokens": raw_payload["input_tokens"],
+                    "output_tokens": raw_payload["output_tokens"],
+                    "total_tokens": raw_payload["total_tokens"],
+                    "thinking_tokens": raw_payload["thinking_tokens"],
+                    "cached_tokens": raw_payload["cached_tokens"],
+                    "latency_ms": latency_ms,
+                    "finish_reason": raw_payload["finish_reason"],
+                    "prompt_block_reason": raw_payload["prompt_block_reason"],
+                    **cost_metadata,
+                },
+                model=raw_payload["model"],
+                usage_details={
+                    key: value
+                    for key, value in {
+                        "input": raw_payload["input_tokens"],
+                        "output": raw_payload["output_tokens"],
+                        "total": raw_payload["total_tokens"],
+                    }.items()
+                    if isinstance(value, int)
+                },
+                cost_details=cost_details,
+            )
+            return result
 
     def _can_fallback(
         self, fallback_eligible: bool, fallback_attempted: bool, estimated_input_tokens: int
@@ -213,6 +261,12 @@ class GeminiClient:
         return (
             isinstance(finish_reason, str) and finish_reason.upper() in _SAFETY_FINISH_REASONS
         ) or result.raw_payload.get("prompt_block_reason") is not None
+
+    @classmethod
+    def _generation_outcome(cls, result: GeminiResult) -> str:
+        if cls._is_explicitly_blocked(result):
+            return "blocked"
+        return "success" if cls._is_usable(result) else "unusable"
 
     @staticmethod
     def _finish_reason(response: Any) -> str | None:
