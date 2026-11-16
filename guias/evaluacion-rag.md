@@ -33,11 +33,13 @@ ni se conecta a Gemini o PostgreSQL:
 poetry run python -m app.knowledge.evaluation --cases /ruta/autorizada/rag_cases.json
 ```
 
-La evaluación real requiere una autorización operativa, `DATABASE_URL`, `GEMINI_API_KEY` y una
-base local con `knowledge_embeddings`. Ejecuta el nodo de recuperación y el nodo de razonamiento
-reales, sin pasar por el Router, para garantizar que todos los casos midan RAG. Gemini actúa
-también como juez; por ello los chunks recuperados se envían al proveedor igual que en la
-generación RAG.
+La evaluación real requiere una autorización operativa, `DATABASE_URL` y una base local con
+`knowledge_embeddings`. Ejecuta el nodo de recuperación y el nodo de razonamiento reales, sin
+pasar por el Router, para garantizar que todos los casos midan RAG. Gemini es el proveedor
+predeterminado de generación y Judge, pero ambos pueden usar los modelos configurados mediante
+LiteLLM. Los embeddings continúan usando Gemini. Por tanto, las credenciales requeridas dependen
+de los proveedores seleccionados; el Judge conserva su configuración sin fallback. Los chunks
+recuperados se envían únicamente al proveedor configurado para cada generación o juicio.
 
 ```bash
 poetry run python -m app.knowledge.evaluation \
@@ -48,6 +50,39 @@ poetry run python -m app.knowledge.evaluation \
 
 El resultado guarda solo identificadores de chunks, configuración, hash del conjunto, métricas y
 categorías de error; no guarda texto de documentos, prompts, respuestas ni secretos.
+
+## Comparación de recuperación híbrida
+
+La comparación real se solicita explícitamente con `--live --compare-retrieval`. Ejecuta las
+variantes semántica, híbrida con RRF e híbrida con reranking con el mismo conjunto, configuración
+de chunking y `retrieval_top_k`. El informe conserva métricas RAG existentes y añade, a nivel de
+documento, Recall@K, Precision@K, MRR, NDCG@K y latencia media de recuperación.
+
+```bash
+poetry run python -m app.knowledge.evaluation \
+  --live \
+  --compare-retrieval \
+  --cases /ruta/autorizada/rag_cases.json \
+  --output /ruta/autorizada/rag_hybrid_results.json
+```
+
+Un documento se deriva del identificador de chunk quitando el último `:indice`; varios chunks del
+mismo documento se cuentan una sola vez para las métricas de recuperación. Los chunks originales
+no se alteran antes de la generación. Las abstenciones se informan separadamente y no participan
+en estas métricas. No se deben versionar el corpus, resultados reales ni información personal.
+
+La comparación híbrida real requiere que la migración FTS se haya aplicado satisfactoriamente.
+El orden operativo es:
+
+1. Inspeccionar el catálogo de PostgreSQL en modo solo lectura.
+2. Verificar la compatibilidad de `knowledge_embeddings`, sus índices y la configuración `spanish`.
+3. Obtener una autorización operativa independiente para modificar la base local.
+4. Aplicar la migración de forma controlada, considerando el bloqueo y almacenamiento requeridos.
+5. Verificar `search_vector`, el índice GIN y una consulta FTS parametrizada.
+6. Ejecutar explícitamente la comparación con `--live --compare-retrieval`.
+
+No se debe ejecutar la comparación híbrida ni afirmar resultados mientras esos pasos no hayan
+concluido correctamente.
 
 ## Métricas y aceptación
 

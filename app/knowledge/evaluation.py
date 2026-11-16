@@ -7,7 +7,9 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from math import log2
 from pathlib import Path
+from time import perf_counter
 from typing import Protocol
 
 from app.agent.nodes.reasoning import reasoning_node
@@ -15,7 +17,7 @@ from app.agent.nodes.retrieval import Retriever, rag_retrieval_node
 from app.agent.state import AgentState, RetrievedDocument
 from app.integrations.gemini import GeminiClient, GeminiResult, TextGenerator
 from app.integrations.settings import get_integrations_settings
-from app.knowledge.retrieval import PostgresVectorRetriever
+from app.knowledge.retrieval import PostgresHybridRetriever, PostgresVectorRetriever
 from app.knowledge.settings import KnowledgeSettings
 
 
@@ -54,6 +56,11 @@ class EvaluationCaseResult:
     retrieved_chunk_count: int
     retrieved_chunk_ids: tuple[str, ...]
     error_category: str | None = None
+    recall_at_k: float | None = None
+    precision_at_k: float | None = None
+    reciprocal_rank: float | None = None
+    ndcg_at_k: float | None = None
+    retrieval_latency_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,11 @@ class EvaluationReport:
     context_precision_mean: float | None
     correct_abstentions: int
     no_evidence_cases: int
+    recall_at_k_mean: float | None = None
+    precision_at_k_mean: float | None = None
+    reciprocal_rank_mean: float | None = None
+    ndcg_at_k_mean: float | None = None
+    retrieval_latency_ms_mean: float | None = None
 
     @property
     def fidelity_target_met(self) -> bool:
@@ -87,6 +99,11 @@ class EvaluationReport:
                 "fidelity_target_met": self.fidelity_target_met,
                 "correct_abstentions": self.correct_abstentions,
                 "no_evidence_cases": self.no_evidence_cases,
+                "recall_at_k_mean": self.recall_at_k_mean,
+                "precision_at_k_mean": self.precision_at_k_mean,
+                "reciprocal_rank_mean": self.reciprocal_rank_mean,
+                "ndcg_at_k_mean": self.ndcg_at_k_mean,
+                "retrieval_latency_ms_mean": self.retrieval_latency_ms_mean,
             },
             "cases": [asdict(case) for case in self.cases],
         }
@@ -258,15 +275,18 @@ def evaluate_cases(
 ) -> EvaluationReport:
     """Evalúa el RAG real inyectado; errores por caso no se convierten en métricas."""
     results: list[EvaluationCaseResult] = []
+    top_k = _evaluation_top_k(configuration)
     for case in cases:
         try:
-            state = _run_rag(case.question, retriever, generator)
+            state, retrieval_latency_ms = _run_rag(case.question, retriever, generator)
+            if state.get("error") == "retrieval_unavailable":
+                raise EvaluationConfigurationError("La recuperación RAG no estuvo disponible")
             documents = state.get("documents", [])
             answer = state.get("answer")
             if not isinstance(answer, str):
                 raise EvaluationConfigurationError("El RAG no produjo una respuesta evaluable")
             judgment = judge.judge(case, answer, documents)
-            results.append(_case_result(case, documents, judgment))
+            results.append(_case_result(case, documents, judgment, top_k, retrieval_latency_ms))
         except Exception as error:
             results.append(
                 EvaluationCaseResult(
@@ -284,12 +304,54 @@ def evaluate_cases(
     return _report(cases, results, configuration, dataset_version)
 
 
-def _run_rag(query: str, retriever: Retriever, generator: TextGenerator) -> AgentState:
+def evaluate_variants(
+    cases: Sequence[EvaluationCase],
+    *,
+    retrievers: Mapping[str, Retriever],
+    generator: TextGenerator,
+    judge: Judge,
+    configuration: Mapping[str, object],
+    dataset_version: str = "in_memory",
+) -> dict[str, EvaluationReport]:
+    """Evalúa las variantes con los mismos casos, top-k y dependencias inyectadas."""
+    return {
+        name: evaluate_cases(
+            cases,
+            retriever=retriever,
+            generator=generator,
+            judge=judge,
+            configuration={**configuration, **_variant_configuration(name)},
+            dataset_version=dataset_version,
+        )
+        for name, retriever in retrievers.items()
+    }
+
+
+def _variant_configuration(name: str) -> dict[str, object]:
+    """Registra el modo efectivo de las tres variantes comparadas."""
+    modes = {
+        "semantic": ("semantic", False),
+        "hybrid_rrf": ("hybrid", False),
+        "hybrid_rerank": ("hybrid", True),
+    }
+    retrieval_mode, rerank_enabled = modes.get(name, ("unknown", False))
+    return {
+        "retrieval_variant": name,
+        "retrieval_mode": retrieval_mode,
+        "hybrid_rerank_enabled": rerank_enabled,
+    }
+
+
+def _run_rag(
+    query: str, retriever: Retriever, generator: TextGenerator
+) -> tuple[AgentState, float]:
     """Ejecuta los nodos RAG reales y evita que el Router omita la recuperación evaluada."""
     state = _rag_state(query)
+    started = perf_counter()
     state.update(rag_retrieval_node(state, retriever))
+    retrieval_latency_ms = (perf_counter() - started) * 1000
     state.update(reasoning_node(state, gemini_client=generator))
-    return state
+    return state, retrieval_latency_ms
 
 
 def _rag_state(question: str) -> AgentState:
@@ -314,6 +376,8 @@ def _case_result(
     case: EvaluationCase,
     documents: Sequence[RetrievedDocument],
     judgment: JudgeResult,
+    top_k: int,
+    retrieval_latency_ms: float,
 ) -> EvaluationCaseResult:
     if judgment.relevant_context_chunks > len(documents):
         raise EvaluationConfigurationError("El juez reportó más chunks relevantes que recuperados")
@@ -325,6 +389,7 @@ def _case_result(
     context_precision = (
         judgment.relevant_context_chunks / len(documents) if documents else None
     )
+    retrieval_metrics = _document_retrieval_metrics(case, documents, top_k)
     return EvaluationCaseResult(
         case_id=case.id,
         status="completed",
@@ -334,6 +399,8 @@ def _case_result(
         abstention_correct=judgment.abstention_correct if case.expects_no_answer else None,
         retrieved_chunk_count=len(documents),
         retrieved_chunk_ids=tuple(document["id"] for document in documents),
+        retrieval_latency_ms=retrieval_latency_ms,
+        **retrieval_metrics,
     )
 
 
@@ -358,11 +425,69 @@ def _report(
         context_precision_mean=mean([result.context_precision for result in completed]),
         correct_abstentions=sum(result.abstention_correct is True for result in completed),
         no_evidence_cases=len(no_evidence),
+        recall_at_k_mean=mean([result.recall_at_k for result in completed]),
+        precision_at_k_mean=mean([result.precision_at_k for result in completed]),
+        reciprocal_rank_mean=mean([result.reciprocal_rank for result in completed]),
+        ndcg_at_k_mean=mean([result.ndcg_at_k for result in completed]),
+        retrieval_latency_ms_mean=mean([result.retrieval_latency_ms for result in completed]),
     )
+
+
+def _evaluation_top_k(configuration: Mapping[str, object]) -> int:
+    value = configuration.get("retrieval_top_k", 4)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise EvaluationConfigurationError("retrieval_top_k debe ser un entero positivo")
+    return value
+
+
+def _document_retrieval_metrics(
+    case: EvaluationCase, documents: Sequence[RetrievedDocument], top_k: int
+) -> dict[str, float | None]:
+    """Mide recuperación por documento sin alterar los chunks enviados a generación."""
+    if case.expects_no_answer:
+        return {
+            "recall_at_k": None,
+            "precision_at_k": None,
+            "reciprocal_rank": None,
+            "ndcg_at_k": None,
+        }
+    document_ids: list[str] = []
+    for document in documents:
+        source_ref, separator, chunk_index = document["id"].rpartition(":")
+        if not separator or not chunk_index.isdigit() or source_ref in document_ids:
+            continue
+        document_ids.append(source_ref)
+    ranked = document_ids[:top_k]
+    expected = set(case.evidence_document_ids)
+    relevant = [document_id in expected for document_id in ranked]
+    hits = sum(relevant)
+    recall = hits / len(expected)
+    precision = hits / top_k
+    first = next((index for index, value in enumerate(relevant, start=1) if value), None)
+    reciprocal_rank = 1 / first if first is not None else 0.0
+    dcg = sum(1 / log2(index + 1) for index, value in enumerate(relevant, start=1) if value)
+    ideal_count = min(len(expected), top_k)
+    ideal_dcg = sum(1 / log2(index + 1) for index in range(1, ideal_count + 1))
+    return {
+        "recall_at_k": recall,
+        "precision_at_k": precision,
+        "reciprocal_rank": reciprocal_rank,
+        "ndcg_at_k": dcg / ideal_dcg if ideal_dcg else None,
+    }
 
 
 def write_report(report: EvaluationReport, path: Path) -> None:
     serialized = json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n"
+    path.write_text(serialized, encoding="utf-8")
+
+
+def write_comparison_report(reports: Mapping[str, EvaluationReport], path: Path) -> None:
+    """Escribe métricas comparables sin persistir prompts, respuestas ni chunks."""
+    serialized = json.dumps(
+        {"variants": {name: report.to_dict() for name, report in reports.items()}},
+        ensure_ascii=False,
+        indent=2,
+    ) + "\n"
     path.write_text(serialized, encoding="utf-8")
 
 
@@ -379,6 +504,14 @@ def _live_configuration(settings: KnowledgeSettings) -> dict[str, object]:
         "chunk_size": settings.chunk_size,
         "chunk_overlap": settings.chunk_overlap,
         "retrieval_top_k": settings.retrieval_top_k,
+        "retrieval_mode": settings.retrieval_mode,
+        "hybrid_candidate_k": settings.hybrid_candidate_k,
+        "hybrid_rrf_k": settings.hybrid_rrf_k,
+        "hybrid_rerank_enabled": settings.hybrid_rerank_enabled,
+        "fts_language": settings.fts_language,
+        "hybrid_rrf_weight": settings.hybrid_rrf_weight,
+        "hybrid_semantic_weight": settings.hybrid_semantic_weight,
+        "hybrid_lexical_weight": settings.hybrid_lexical_weight,
         "generation_model": generation_model,
         "generation_provider": _model_provider(generation_model),
         "generation_model_used": None,
@@ -398,11 +531,23 @@ def _model_provider(model: str) -> str:
     return model.partition("/")[0]
 
 
+def _evaluation_retriever(settings: KnowledgeSettings) -> Retriever:
+    """Respeta el modo configurado sin alterar el contrato del evaluador."""
+    if settings.retrieval_mode == "hybrid":
+        return PostgresHybridRetriever(settings)
+    return PostgresVectorRetriever(settings)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Evalúa el RAG solo bajo solicitud explícita")
     parser.add_argument("--cases", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--live", action="store_true", help="Autoriza Gemini y PostgreSQL")
+    parser.add_argument(
+        "--compare-retrieval",
+        action="store_true",
+        help="Evalúa semántica, híbrida RRF e híbrida con reranking bajo --live",
+    )
     args = parser.parse_args(argv)
     cases, dataset_version = load_cases(args.cases)
     if not args.live:
@@ -412,9 +557,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--output es obligatorio junto con --live")
     settings = KnowledgeSettings()
     generator = GeminiClient(get_integrations_settings())
+    if args.compare_retrieval:
+        semantic_settings = settings.model_copy(update={"retrieval_mode": "semantic"})
+        hybrid_settings = settings.model_copy(
+            update={"retrieval_mode": "hybrid", "hybrid_rerank_enabled": False}
+        )
+        reranked_settings = settings.model_copy(
+            update={"retrieval_mode": "hybrid", "hybrid_rerank_enabled": True}
+        )
+        reports = evaluate_variants(
+            cases,
+            retrievers={
+                "semantic": PostgresVectorRetriever(semantic_settings),
+                "hybrid_rrf": PostgresHybridRetriever(hybrid_settings),
+                "hybrid_rerank": PostgresHybridRetriever(reranked_settings),
+            },
+            generator=generator,
+            judge=GeminiJudge(generator),
+            configuration=_live_configuration(settings),
+            dataset_version=dataset_version,
+        )
+        write_comparison_report(reports, args.output)
+        return 0 if all(report.fidelity_target_met for report in reports.values()) else 2
     report = evaluate_cases(
         cases,
-        retriever=PostgresVectorRetriever(settings),
+        retriever=_evaluation_retriever(settings),
         generator=generator,
         judge=GeminiJudge(generator),
         configuration=_live_configuration(settings),

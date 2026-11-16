@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from app.knowledge.evaluation import (
     JudgeResult,
     _live_configuration,
     evaluate_cases,
+    evaluate_variants,
     load_cases,
     main,
     parse_judge_result,
@@ -286,6 +288,10 @@ def test_configuracion_en_vivo_declara_gemini_predeterminado_sin_modelo_usado(mo
     assert configuration["judge_model"] == "gemini/gemini-3.5-flash"
     assert configuration["generation_model_used"] is None
     assert configuration["judge_model_used"] is None
+    assert configuration["fts_language"] == "spanish"
+    assert configuration["hybrid_rrf_weight"] == 0.4
+    assert configuration["hybrid_semantic_weight"] == 0.3
+    assert configuration["hybrid_lexical_weight"] == 0.3
 
 
 def test_configuracion_en_vivo_declara_modelos_por_tarea_sin_atribuir_uso(monkeypatch):
@@ -306,3 +312,125 @@ def test_configuracion_en_vivo_declara_modelos_por_tarea_sin_atribuir_uso(monkey
     assert configuration["judge_provider"] == "anthropic"
     assert configuration["generation_model_used"] is None
     assert configuration["judge_model_used"] is None
+
+
+def test_metricas_de_recuperacion_deduplican_chunks_por_documento():
+    report = evaluate_cases(
+        (_case(),),
+        retriever=lambda _: [
+            {"id": "documento:7:0", "content": "a", "score": 0.9},
+            {"id": "documento:7:1", "content": "b", "score": 0.8},
+            {"id": "documento:8:0", "content": "c", "score": 0.7},
+        ],
+        generator=FakeGenerator(["Respuesta"]),
+        judge=FakeJudge([JudgeResult(1, 1, 1.0, 1, False)]),
+        configuration={"retrieval_top_k": 2},
+    )
+
+    result = report.cases[0]
+    assert result.recall_at_k == 1.0
+    assert result.precision_at_k == 0.5
+    assert result.reciprocal_rank == 1.0
+    assert result.ndcg_at_k == 1.0
+    assert result.retrieval_latency_ms is not None
+    assert "Respuesta" not in json.dumps(report.to_dict())
+
+
+def test_compara_variantes_con_los_mismos_casos_y_top_k():
+    reports = evaluate_variants(
+        (_case(),),
+        retrievers={
+            "semantic": lambda _: [{"id": "documento:7:0", "content": "a", "score": 0.9}],
+            "hybrid_rrf": lambda _: [{"id": "documento:8:0", "content": "b", "score": 0.9}],
+            "hybrid_rerank": lambda _: [{"id": "documento:7:1", "content": "c", "score": 0.9}],
+        },
+        generator=FakeGenerator(["Respuesta", "Respuesta", "Respuesta"]),
+        judge=FakeJudge(
+            [
+                JudgeResult(1, 1, 1.0, 1, False),
+                JudgeResult(1, 1, 1.0, 0, False),
+                JudgeResult(1, 1, 1.0, 1, False),
+            ]
+        ),
+        configuration={"retrieval_top_k": 4},
+    )
+
+    assert list(reports) == ["semantic", "hybrid_rrf", "hybrid_rerank"]
+    assert reports["semantic"].configuration["retrieval_variant"] == "semantic"
+    assert reports["semantic"].configuration["retrieval_mode"] == "semantic"
+    assert reports["hybrid_rrf"].configuration["retrieval_mode"] == "hybrid"
+    assert reports["hybrid_rrf"].configuration["hybrid_rerank_enabled"] is False
+    assert reports["hybrid_rerank"].configuration["hybrid_rerank_enabled"] is True
+    assert reports["hybrid_rrf"].recall_at_k_mean == 0.0
+    assert reports["hybrid_rerank"].recall_at_k_mean == 1.0
+
+
+@pytest.mark.parametrize(
+    ("retrieval_mode", "expected"),
+    [("semantic", "semantic-retriever"), ("hybrid", "hybrid-retriever")],
+)
+def test_main_individual_respeta_retrieval_mode(monkeypatch, retrieval_mode, expected):
+    settings = KnowledgeSettings(
+        _env_file=None,
+        database_url="postgresql://user:password@localhost/agente_inteligente_bd",
+        gemini_api_key="secret",
+        retrieval_mode=retrieval_mode,
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("app.knowledge.evaluation.load_cases", lambda _: ((_case(),), "dataset"))
+    monkeypatch.setattr("app.knowledge.evaluation.KnowledgeSettings", lambda: settings)
+    monkeypatch.setattr("app.knowledge.evaluation.GeminiClient", lambda _: object())
+    monkeypatch.setattr("app.knowledge.evaluation.GeminiJudge", lambda _: object())
+    monkeypatch.setattr(
+        "app.knowledge.evaluation.PostgresVectorRetriever", lambda _: "semantic-retriever"
+    )
+    monkeypatch.setattr(
+        "app.knowledge.evaluation.PostgresHybridRetriever", lambda _: "hybrid-retriever"
+    )
+    monkeypatch.setattr("app.knowledge.evaluation.get_integrations_settings", lambda: object())
+    monkeypatch.setattr("app.knowledge.evaluation._live_configuration", lambda _: {"safe": True})
+    monkeypatch.setattr("app.knowledge.evaluation.write_report", lambda *_: None)
+
+    def fake_evaluate(*_, retriever, configuration, **__):
+        captured["retriever"] = retriever
+        captured["configuration"] = configuration
+        return SimpleNamespace(fidelity_target_met=True)
+
+    monkeypatch.setattr("app.knowledge.evaluation.evaluate_cases", fake_evaluate)
+
+    assert main(["--cases", "cases.json", "--live", "--output", "report.json"]) == 0
+    assert captured == {"retriever": expected, "configuration": {"safe": True}}
+
+
+def test_recuperacion_fallida_no_produce_metricas_ficticias():
+    report = evaluate_cases(
+        (_case(),),
+        retriever=lambda _: (_ for _ in ()).throw(RuntimeError("fallo de base")),
+        generator=FakeGenerator(["Respuesta no persistida"]),
+        judge=FakeJudge([]),
+        configuration={"retrieval_top_k": 4},
+    )
+
+    result = report.cases[0]
+    assert result.status == "error"
+    assert result.error_category == "EvaluationConfigurationError"
+    assert result.recall_at_k is None
+    assert result.retrieval_latency_ms is None
+    assert "fallo de base" not in json.dumps(report.to_dict())
+
+
+def test_recuperacion_exitosa_sin_resultados_se_evalua_como_contexto_vacio():
+    report = evaluate_cases(
+        (_case(),),
+        retriever=lambda _: [],
+        generator=FakeGenerator(["Sin contexto"]),
+        judge=FakeJudge([JudgeResult(0, 1, 0.0, 0, False)]),
+        configuration={"retrieval_top_k": 4},
+    )
+
+    result = report.cases[0]
+    assert result.status == "completed"
+    assert result.retrieved_chunk_count == 0
+    assert result.context_precision is None
+    assert result.recall_at_k == result.precision_at_k == result.reciprocal_rank == 0.0
+    assert result.ndcg_at_k == 0.0
