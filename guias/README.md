@@ -6,6 +6,7 @@
 | [`integracion-widget.md`](integracion-widget.md) | Equipos de clientes que embeben el chat | Inicio rápido, atributos, seguridad, CSP/CORS, móvil y solución de problemas |
 | [`administracion.md`](administracion.md) | Administradores y operadores | Primer admin, inicio de sesión, vistas del panel web, roles, seguridad y endpoints `/admin` |
 | [`evaluacion-rag.md`](evaluacion-rag.md) | Mantenimiento de conocimiento | Preparación autorizada, ejecución y métricas de evaluación RAG |
+| [`pruebas-estres-latencia.md`](pruebas-estres-latencia.md) | Operación técnica | Instrumentos locales de WebSocket y `ConversationService`, límites y lectura de métricas |
 
 Referencias relacionadas: [`widget/README.md`](../widget/README.md), [`widget/PROTOCOL.md`](../widget/PROTOCOL.md) y [`deploy/README.md`](../deploy/README.md).
 
