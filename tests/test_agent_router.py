@@ -32,6 +32,17 @@ def test_router_envia_directamente_a_reasoning_sin_recuperacion():
     assert route_after_router({**state, **update}) == "reasoning"
 
 
+def test_router_no_atribuye_proveedor_cuando_la_clasificacion_falla():
+    class FailingGenerator:
+        def generate(self, _: str):
+            raise RuntimeError("unavailable")
+
+    update = router_node(_state(retrieval_requested=True), FailingGenerator())  # type: ignore[arg-type]
+
+    assert update["route"] == "rag"
+    assert update["messages"][-1]["raw_payload"] == {"error": "classification_unavailable"}
+
+
 def test_router_marca_comparacion_razonada_como_elegible_para_fallback():
     state = {
         **_state(retrieval_requested=False),

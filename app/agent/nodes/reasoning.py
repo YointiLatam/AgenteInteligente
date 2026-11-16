@@ -1,4 +1,4 @@
-"""Generación de respuestas mediante Gemini."""
+"""Generación de respuestas mediante el adaptador textual configurado."""
 
 from app.agent.nodes.memory import conversation_context, estimate_tokens
 from app.agent.state import AgentState
@@ -40,18 +40,19 @@ def _generate_reasoning(
         fallback_eligible=state.get("fallback_eligible", False),
         fallback_attempted=state.get("fallback_attempted", False),
         estimated_input_tokens=estimate_tokens(prompt),
+        task="reasoning",
     )
 
 
 def reasoning_node(
     state: AgentState, gemini_client: TextGenerator | None = None
 ) -> dict[str, str | bool | list | None]:
-    """Genera respuesta con Gemini; conserva una degradación determinista ante fallos."""
+    """Genera una respuesta y conserva una degradación determinista ante fallos."""
     if gemini_client is None:
         answer = _fallback_answer(state)
         if state.get("turn_id") is None:
             return {"answer": answer}
-        raw_payload = {"provider": "gemini", "error": "generation_unavailable"}
+        raw_payload = {"error": "generation_unavailable"}
     else:
         try:
             result = _generate_reasoning(gemini_client, _reasoning_prompt(state), state)
@@ -62,7 +63,7 @@ def reasoning_node(
             raw_payload = error.raw_payload
         except Exception:
             answer = _fallback_answer(state)
-            raw_payload = {"provider": "gemini", "error": "generation_unavailable"}
+            raw_payload = {"error": "generation_unavailable"}
     message = {"role": "assistant", "content": answer, "raw_payload": raw_payload}
     if state.get("turn_id") is not None:
         message["turn_id"] = state["turn_id"]

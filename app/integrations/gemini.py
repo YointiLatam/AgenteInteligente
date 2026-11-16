@@ -1,11 +1,11 @@
-"""Cliente reutilizable para las llamadas de texto a Gemini."""
+"""Punto único de generación textual mediante LiteLLM."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Protocol
 
-from google import genai
-from google.genai import types
+from litellm import completion
 
 from app.integrations.settings import IntegrationsSettings
 from app.observability.telemetry import get_telemetry
@@ -20,6 +20,13 @@ _SAFETY_FINISH_REASONS = {
     "IMAGE_SAFETY",
     "MODEL_ARMOR",
     "JAILBREAK",
+    "CONTENT_FILTER",
+}
+_TASK_SETTINGS = {
+    "router": "llm_router_model",
+    "memory": "llm_memory_model",
+    "reasoning": "llm_reasoning_model",
+    "judge": "llm_judge_model",
 }
 
 
@@ -50,21 +57,29 @@ class TextGenerator(Protocol):
 
 
 class GeminiClient:
-    """Adaptador sin estado para generación de texto mediante el SDK oficial."""
+    """Adaptador LiteLLM; Gemini es la prioridad predeterminada."""
 
-    def __init__(self, settings: IntegrationsSettings, model: str | None = None) -> None:
-        if settings.gemini_api_key is None:
-            raise GeminiNotConfigured("Falta la credencial de Gemini")
-        self._client = genai.Client(api_key=settings.gemini_api_key.get_secret_value())
-        self._model = model or settings.gemini_primary_model
-        self._fallback_model = settings.gemini_fallback_model
+    def __init__(
+        self,
+        settings: IntegrationsSettings,
+        model: str | None = None,
+        *,
+        completion_fn: Callable[..., Any] | None = None,
+    ) -> None:
+        self._settings = settings
+        self._completion = completion_fn or completion
+        self._model = self._normalize_model(model or settings.gemini_primary_model)
         self._fallback_enabled = settings.gemini_fallback_enabled
         self._fallback_max_attempts = settings.gemini_fallback_max_attempts
         self._fallback_input_token_limit = settings.gemini_fallback_input_token_limit
         self._fallback_max_output_tokens = settings.gemini_fallback_max_output_tokens
+        self._require_credential(self._model)
 
     def generate(self, prompt: str) -> GeminiResult:
         return self._generate_model(prompt, self._model)
+
+    def generate_for_task(self, prompt: str, *, task: str) -> GeminiResult:
+        return self._generate_model(prompt, self._task_model(task))
 
     def generate_with_fallback(
         self,
@@ -73,18 +88,21 @@ class GeminiClient:
         fallback_eligible: bool,
         estimated_input_tokens: int,
         fallback_attempted: bool = False,
+        task: str = "reasoning",
     ) -> GeminiResult:
+        primary_model = self._task_model(task)
         attempts: list[dict[str, Any]] = []
         fallback_reason: str | None = None
         try:
-            primary = self._generate_model(prompt, self._model)
+            primary = self._generate_model(prompt, primary_model)
             if self._is_explicitly_blocked(primary):
                 attempts.append(self._attempt_payload(primary.raw_payload, "blocked"))
                 raise GeminiGenerationError(
                     self._audit_payload(
                         attempts,
-                        requested_model=self._model,
+                        requested_model=primary_model,
                         used_model=primary.raw_payload["model"],
+                        used_provider=self._provider(primary_model),
                         fallback_reason="safety_blocked",
                     )
                 )
@@ -94,8 +112,9 @@ class GeminiClient:
                     text=primary.text,
                     raw_payload=self._audit_payload(
                         attempts,
-                        requested_model=self._model,
+                        requested_model=primary_model,
                         used_model=primary.raw_payload["model"],
+                        used_provider=self._provider(primary_model),
                         fallback_reason=None,
                     ),
                 )
@@ -108,40 +127,55 @@ class GeminiClient:
         except GeminiGenerationError:
             raise
         except Exception as error:
-            attempts.append(self._error_attempt(self._model, error))
+            attempts.append(self._error_attempt(primary_model, error))
             if not self._is_recoverable(error):
                 raise GeminiGenerationError(
                     self._audit_payload(
                         attempts,
-                        requested_model=self._model,
+                        requested_model=primary_model,
                         used_model=None,
                         fallback_reason="primary_error_nonrecoverable",
                     )
                 ) from error
             fallback_reason = "primary_error_recoverable"
 
-        if not self._can_fallback(fallback_eligible, fallback_attempted, estimated_input_tokens):
+        fallback_model = self._fallback_model_for(primary_model)
+        if not self._can_fallback(
+            fallback_eligible, fallback_attempted, estimated_input_tokens, fallback_model
+        ):
             raise GeminiGenerationError(
                 self._audit_payload(
                     attempts,
-                    requested_model=self._model,
+                    requested_model=primary_model,
                     used_model=None,
                     fallback_reason=fallback_reason,
                 )
             )
+        assert fallback_model is not None
         try:
             fallback = self._generate_model(
                 prompt,
-                self._fallback_model,
+                fallback_model,
                 max_output_tokens=self._fallback_max_output_tokens,
                 fallback_used=True,
             )
+            if self._is_explicitly_blocked(fallback):
+                attempts.append(self._attempt_payload(fallback.raw_payload, "blocked"))
+                raise GeminiGenerationError(
+                    self._audit_payload(
+                        attempts,
+                        requested_model=primary_model,
+                        used_model=fallback.raw_payload["model"],
+                        used_provider=self._provider(fallback_model),
+                        fallback_reason="safety_blocked",
+                    )
+                )
             if not self._is_usable(fallback):
                 attempts.append(self._attempt_payload(fallback.raw_payload, "unusable"))
                 raise GeminiGenerationError(
                     self._audit_payload(
                         attempts,
-                        requested_model=self._model,
+                        requested_model=primary_model,
                         used_model=None,
                         fallback_reason=fallback_reason,
                     )
@@ -150,11 +184,11 @@ class GeminiClient:
         except GeminiGenerationError:
             raise
         except Exception as error:
-            attempts.append(self._error_attempt(self._fallback_model, error))
+            attempts.append(self._error_attempt(fallback_model, error))
             raise GeminiGenerationError(
                 self._audit_payload(
                     attempts,
-                    requested_model=self._model,
+                    requested_model=primary_model,
                     used_model=None,
                     fallback_reason=fallback_reason,
                 )
@@ -163,8 +197,9 @@ class GeminiClient:
             text=fallback.text,
             raw_payload=self._audit_payload(
                 attempts,
-                requested_model=self._model,
+                requested_model=primary_model,
                 used_model=fallback.raw_payload["model"],
+                used_provider=self._provider(fallback_model),
                 fallback_reason=fallback_reason,
             ),
         )
@@ -177,36 +212,31 @@ class GeminiClient:
         max_output_tokens: int | None = None,
         fallback_used: bool = False,
     ) -> GeminiResult:
+        provider = self._provider(model)
+        api_key = self._require_credential(model)
         telemetry = get_telemetry()
         with telemetry.observation(
-            "gemini.generate",
+            "llm.generate",
             as_type="generation",
-            metadata={"requested_model": model, "fallback_used": fallback_used},
+            metadata={
+                "provider": provider,
+                "requested_model": model,
+                "fallback_used": fallback_used,
+            },
             model=model,
         ) as span:
             started = perf_counter()
-            arguments: dict[str, Any] = {"model": model, "contents": prompt}
-            if max_output_tokens is not None:
-                arguments["config"] = types.GenerateContentConfig(
-                    max_output_tokens=max_output_tokens
-                )
-            response = self._client.models.generate_content(**arguments)
-            latency_ms = round((perf_counter() - started) * 1000)
-            usage = response.usage_metadata
-            raw_payload = {
-                "provider": "gemini",
-                "model": getattr(response, "model_version", None) or model,
-                "requested_model": model,
-                "input_tokens": getattr(usage, "prompt_token_count", None),
-                "output_tokens": getattr(usage, "candidates_token_count", None),
-                "total_tokens": getattr(usage, "total_token_count", None),
-                "thinking_tokens": getattr(usage, "thoughts_token_count", None),
-                "cached_tokens": getattr(usage, "cached_content_token_count", None),
-                "finish_reason": self._finish_reason(response),
-                "prompt_block_reason": self._prompt_block_reason(response),
-                "latency_ms": latency_ms,
+            arguments: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "api_key": api_key,
             }
-            result = GeminiResult(text=response.text or "", raw_payload=raw_payload)
+            if max_output_tokens is not None:
+                arguments["max_tokens"] = max_output_tokens
+            response = self._completion(**arguments)
+            latency_ms = round((perf_counter() - started) * 1000)
+            raw_payload = self._response_payload(response, model, provider, latency_ms)
+            result = GeminiResult(text=self._response_text(response), raw_payload=raw_payload)
             cost_details, cost_metadata = telemetry.gemini_cost(
                 raw_payload["model"], raw_payload["input_tokens"], raw_payload["output_tokens"]
             )
@@ -214,13 +244,12 @@ class GeminiClient:
                 span,
                 {
                     "outcome": self._generation_outcome(result),
+                    "provider": provider,
                     "fallback_used": fallback_used,
                     "used_model": raw_payload["model"],
                     "input_tokens": raw_payload["input_tokens"],
                     "output_tokens": raw_payload["output_tokens"],
                     "total_tokens": raw_payload["total_tokens"],
-                    "thinking_tokens": raw_payload["thinking_tokens"],
-                    "cached_tokens": raw_payload["cached_tokens"],
                     "latency_ms": latency_ms,
                     "finish_reason": raw_payload["finish_reason"],
                     "prompt_block_reason": raw_payload["prompt_block_reason"],
@@ -240,8 +269,32 @@ class GeminiClient:
             )
             return result
 
+    def _task_model(self, task: str) -> str:
+        field = _TASK_SETTINGS.get(task)
+        configured = getattr(self._settings, field) if field else None
+        model = self._normalize_model(configured) if configured else self._model
+        self._require_credential(model)
+        return model
+
+    def _fallback_model_for(self, primary_model: str) -> str | None:
+        configured = self._settings.llm_fallback_model
+        candidate = self._normalize_model(configured) if configured else self._normalize_model(
+            self._settings.gemini_fallback_model
+        )
+        if candidate == primary_model:
+            return None
+        try:
+            self._require_credential(candidate)
+        except GeminiNotConfigured:
+            return None
+        return candidate
+
     def _can_fallback(
-        self, fallback_eligible: bool, fallback_attempted: bool, estimated_input_tokens: int
+        self,
+        fallback_eligible: bool,
+        fallback_attempted: bool,
+        estimated_input_tokens: int,
+        fallback_model: str | None,
     ) -> bool:
         return (
             fallback_eligible
@@ -249,7 +302,83 @@ class GeminiClient:
             and self._fallback_enabled
             and self._fallback_max_attempts == 1
             and estimated_input_tokens <= self._fallback_input_token_limit
+            and fallback_model is not None
         )
+
+    def _require_credential(self, model: str) -> str:
+        secret = {
+            "gemini": self._settings.gemini_api_key,
+            "openai": self._settings.openai_api_key,
+            "anthropic": self._settings.anthropic_api_key,
+        }.get(self._provider(model))
+        if secret is None:
+            raise GeminiNotConfigured(f"Falta una credencial para {self._provider(model)}")
+        return secret.get_secret_value()
+
+    @staticmethod
+    def _normalize_model(model: str) -> str:
+        return model if "/" in model else f"gemini/{model}"
+
+    @staticmethod
+    def _provider(model: str) -> str:
+        return model.partition("/")[0]
+
+    @staticmethod
+    def _value(value: Any, key: str, default: Any = None) -> Any:
+        return value.get(key, default) if isinstance(value, dict) else getattr(value, key, default)
+
+    @classmethod
+    def _response_text(cls, response: Any) -> str:
+        choices = cls._value(response, "choices", []) or []
+        if not choices:
+            legacy_text = cls._value(response, "text")
+            return legacy_text if isinstance(legacy_text, str) else ""
+        message = cls._value(choices[0], "message") if choices else None
+        content = cls._value(message, "content")
+        return content if isinstance(content, str) else ""
+
+    @classmethod
+    def _response_payload(
+        cls, response: Any, requested_model: str, provider: str, latency_ms: int
+    ) -> dict[str, Any]:
+        choices = cls._value(response, "choices", []) or []
+        choice = choices[0] if choices else None
+        usage = cls._value(response, "usage") or cls._value(response, "usage_metadata")
+        finish_reason = (
+            cls._value(choice, "finish_reason")
+            if choice is not None
+            else cls._finish_reason(response)
+        )
+        feedback = cls._value(response, "prompt_feedback")
+        block_reason = cls._value(feedback, "block_reason")
+        prompt_block_reason = cls._value(block_reason, "value", block_reason)
+        response_model = (
+            cls._value(response, "model")
+            or cls._value(response, "model_version")
+            or requested_model
+        )
+        input_tokens = cls._value(
+            usage, "prompt_tokens", cls._value(usage, "prompt_token_count")
+        )
+        output_tokens = cls._value(
+            usage, "completion_tokens", cls._value(usage, "candidates_token_count")
+        )
+        total_tokens = cls._value(
+            usage, "total_tokens", cls._value(usage, "total_token_count")
+        )
+        return {
+            "provider": provider,
+            "model": response_model,
+            "requested_model": requested_model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "finish_reason": str(finish_reason).upper() if finish_reason is not None else None,
+            "prompt_block_reason": (
+                str(prompt_block_reason) if prompt_block_reason is not None else None
+            ),
+            "latency_ms": latency_ms,
+        }
 
     @staticmethod
     def _is_usable(result: GeminiResult) -> bool:
@@ -290,7 +419,7 @@ class GeminiClient:
         if isinstance(error, TimeoutError):
             return True
         code = getattr(error, "code", None) or getattr(error, "status_code", None)
-        return isinstance(code, int) and code in {408, 500, 502, 503, 504}
+        return isinstance(code, int) and code in {408, 429, 500, 502, 503, 504}
 
     @staticmethod
     def _attempt_payload(payload: dict[str, Any], outcome: str) -> dict[str, Any]:
@@ -300,7 +429,7 @@ class GeminiClient:
     def _error_attempt(cls, model: str, error: Exception) -> dict[str, Any]:
         code = getattr(error, "code", None) or getattr(error, "status_code", None)
         return {
-            "provider": "gemini",
+            "provider": GeminiClient._provider(model),
             "model": model,
             "requested_model": model,
             "error": cls._error_category(code, error),
@@ -324,13 +453,14 @@ class GeminiClient:
         requested_model: str,
         used_model: str | None,
         fallback_reason: str | None,
+        used_provider: str | None = None,
     ) -> dict[str, Any]:
         def total(field: str) -> int | None:
             values = [item[field] for item in attempts if isinstance(item.get(field), int)]
             return sum(values) if values else None
 
         return {
-            "provider": "gemini",
+            "provider": used_provider or GeminiClient._provider(requested_model),
             "model": used_model or requested_model,
             "requested_model": requested_model,
             "used_model": used_model,

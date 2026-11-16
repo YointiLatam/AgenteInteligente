@@ -1,3 +1,5 @@
+import pytest
+
 from app.agent.nodes.reasoning import _reasoning_prompt, reasoning_node
 from app.agent.state import AgentState
 from app.integrations.gemini import GeminiGenerationError, GeminiResult
@@ -75,6 +77,13 @@ def test_reasoning_conserva_auditoria_si_fallan_ambos_modelos():
 
     assert update["answer"] == "Respuesta sin contexto recuperado para: ¿Cómo funciona JWT?"
     assert update["messages"][-1]["raw_payload"] == payload
+
+
+@pytest.mark.parametrize("client", [None, FallbackClient(RuntimeError("unavailable"))])
+def test_reasoning_no_atribuye_proveedor_cuando_no_hay_evidencia(client):
+    update = reasoning_node(_state(turn_id="turn-1"), client)  # type: ignore[arg-type]
+
+    assert update["messages"][-1]["raw_payload"] == {"error": "generation_unavailable"}
 
 
 def test_prompt_delimita_consulta_memoria_y_contexto_rag_no_confiables():

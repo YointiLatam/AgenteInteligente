@@ -424,7 +424,8 @@ def test_salida_bloqueada_se_sustituye_y_audita_sin_el_valor_sensible():
             "decision": "blocked_output",
             "category": "secret_assignment",
             "policy_version": "v1",
-        }
+        },
+        "_model_usage": {"provider": "fake"},
     }
 
 
