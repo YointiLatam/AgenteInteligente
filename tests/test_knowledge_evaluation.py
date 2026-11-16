@@ -3,16 +3,19 @@ import json
 import pytest
 
 from app.integrations.gemini import GeminiResult
+from app.integrations.settings import IntegrationsSettings
 from app.knowledge.evaluation import (
     EvaluationCase,
     EvaluationConfigurationError,
     GeminiJudge,
     JudgeResult,
+    _live_configuration,
     evaluate_cases,
     load_cases,
     main,
     parse_judge_result,
 )
+from app.knowledge.settings import KnowledgeSettings
 
 
 class FakeGenerator:
@@ -268,3 +271,38 @@ def test_rechaza_caso_sin_evidencia_para_respuesta_esperada(tmp_path):
 
     with pytest.raises(EvaluationConfigurationError):
         load_cases(cases)
+
+
+def test_configuracion_en_vivo_declara_gemini_predeterminado_sin_modelo_usado(monkeypatch):
+    monkeypatch.setattr(
+        "app.knowledge.evaluation.get_integrations_settings",
+        lambda: IntegrationsSettings(_env_file=None),
+    )
+
+    configuration = _live_configuration(KnowledgeSettings(_env_file=None))
+
+    assert configuration["generation_model"] == "gemini/gemini-3.5-flash"
+    assert configuration["generation_provider"] == "gemini"
+    assert configuration["judge_model"] == "gemini/gemini-3.5-flash"
+    assert configuration["generation_model_used"] is None
+    assert configuration["judge_model_used"] is None
+
+
+def test_configuracion_en_vivo_declara_modelos_por_tarea_sin_atribuir_uso(monkeypatch):
+    monkeypatch.setattr(
+        "app.knowledge.evaluation.get_integrations_settings",
+        lambda: IntegrationsSettings(
+            _env_file=None,
+            llm_reasoning_model="openai/gpt-4.1-mini",
+            llm_judge_model="anthropic/claude-haiku",
+        ),
+    )
+
+    configuration = _live_configuration(KnowledgeSettings(_env_file=None))
+
+    assert configuration["generation_model"] == "openai/gpt-4.1-mini"
+    assert configuration["generation_provider"] == "openai"
+    assert configuration["judge_model"] == "anthropic/claude-haiku"
+    assert configuration["judge_provider"] == "anthropic"
+    assert configuration["generation_model_used"] is None
+    assert configuration["judge_model_used"] is None

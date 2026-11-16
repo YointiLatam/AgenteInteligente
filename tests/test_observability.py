@@ -172,18 +172,102 @@ def test_gemini_records_usage_cost_and_no_prompt(monkeypatch):
             cached_content_token_count=None,
         ),
     )
-    monkeypatch.setattr(gemini._client.models, "generate_content", lambda **_: response)
+    gemini._completion = lambda **_: response
 
     gemini.generate("prompt privado")
 
     [generation] = [
-        item for item in client.observations if item["kwargs"]["name"] == "gemini.generate"
+        item for item in client.observations if item["kwargs"]["name"] == "llm.generate"
     ]
     update = generation["updates"][-1]
     assert update["usage_details"] == {"input": 10, "output": 5, "total": 15}
     assert update["cost_details"]["total"] == pytest.approx(0.00004)
     assert "prompt privado" not in repr(generation)
     assert "respuesta privada" not in repr(generation)
+
+
+def test_openai_sin_tarifa_verificada_no_hereda_costo_de_gemini():
+    client = RecordingLangfuse()
+    set_telemetry(
+        Telemetry(
+            client,
+            enabled=True,
+            costs={"gemini/gemini-3.5-flash": GeminiCost(2.0, 4.0)},
+        )
+    )
+    response = SimpleNamespace(
+        model="gpt-reportado-sin-prefijo",
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="respuesta privada"), finish_reason="stop"
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+    generator = GeminiClient(
+        IntegrationsSettings(openai_api_key="openai-secret"),
+        model="openai/gpt-configurado",
+        completion_fn=lambda **_: response,
+    )
+
+    generator.generate("prompt privado")
+
+    [generation] = [
+        item for item in client.observations if item["kwargs"]["name"] == "llm.generate"
+    ]
+    update = generation["updates"][-1]
+    assert update["metadata"]["provider"] == "openai"
+    assert update["metadata"]["cost_available"] is False
+    assert "cost_details" not in update
+    assert update["usage_details"] == {"input": 10, "output": 5, "total": 15}
+    assert "prompt privado" not in repr(generation)
+    assert "respuesta privada" not in repr(generation)
+    assert "openai-secret" not in repr(generation)
+
+
+def test_litellm_normalizado_registra_proveedor_modelo_tokens_y_resultado_sin_contenido():
+    client = RecordingLangfuse()
+    set_telemetry(Telemetry(client, enabled=True))
+    response = SimpleNamespace(
+        model="anthropic/claude-haiku",
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="respuesta privada"), finish_reason="stop"
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=7, completion_tokens=3, total_tokens=10),
+    )
+    generator = GeminiClient(
+        IntegrationsSettings(anthropic_api_key="anthropic-secret"),
+        model="anthropic/claude-haiku",
+        completion_fn=lambda **_: response,
+    )
+
+    generator.generate("prompt privado")
+
+    [generation] = [
+        item for item in client.observations if item["kwargs"]["name"] == "llm.generate"
+    ]
+    update = generation["updates"][-1]
+    assert generation["kwargs"]["metadata"]["provider"] == "anthropic"
+    assert generation["kwargs"]["model"] == "anthropic/claude-haiku"
+    assert update["metadata"] == {
+        "outcome": "success",
+        "provider": "anthropic",
+        "fallback_used": False,
+        "used_model": "anthropic/claude-haiku",
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+        "latency_ms": update["metadata"]["latency_ms"],
+        "finish_reason": "STOP",
+        "prompt_block_reason": None,
+        "cost_available": False,
+    }
+    assert update["usage_details"] == {"input": 7, "output": 3, "total": 10}
+    assert "prompt privado" not in repr(generation)
+    assert "respuesta privada" not in repr(generation)
+    assert "anthropic-secret" not in repr(generation)
 
 
 @pytest.mark.parametrize(
@@ -216,12 +300,12 @@ def test_gemini_observability_classifies_provider_response(
             cached_content_token_count=None,
         ),
     )
-    monkeypatch.setattr(gemini._client.models, "generate_content", lambda **_: response)
+    gemini._completion = lambda **_: response
 
     gemini.generate("prompt privado")
 
     [generation] = [
-        item for item in client.observations if item["kwargs"]["name"] == "gemini.generate"
+        item for item in client.observations if item["kwargs"]["name"] == "llm.generate"
     ]
     assert generation["updates"][-1]["metadata"]["outcome"] == expected
 
@@ -230,17 +314,13 @@ def test_gemini_observability_marks_provider_error(monkeypatch):
     client = RecordingLangfuse()
     set_telemetry(Telemetry(client, enabled=True))
     gemini = GeminiClient(IntegrationsSettings(gemini_api_key="test-key"))
-    monkeypatch.setattr(
-        gemini._client.models,
-        "generate_content",
-        lambda **_: (_ for _ in ()).throw(TimeoutError("provider error")),
-    )
+    gemini._completion = lambda **_: (_ for _ in ()).throw(TimeoutError("provider error"))
 
     with pytest.raises(TimeoutError):
         gemini.generate("prompt privado")
 
     [generation] = [
-        item for item in client.observations if item["kwargs"]["name"] == "gemini.generate"
+        item for item in client.observations if item["kwargs"]["name"] == "llm.generate"
     ]
     assert any(update["metadata"].get("outcome") == "error" for update in generation["updates"])
 
@@ -262,12 +342,12 @@ def test_fallback_generation_is_labeled_without_prompt(monkeypatch):
             cached_content_token_count=None,
         ),
     )
-    monkeypatch.setattr(gemini._client.models, "generate_content", lambda **_: response)
+    gemini._completion = lambda **_: response
 
-    gemini._generate_model("prompt privado", "fallback-model", fallback_used=True)
+    gemini._generate_model("prompt privado", "gemini/fallback-model", fallback_used=True)
 
     [generation] = [
-        item for item in client.observations if item["kwargs"]["name"] == "gemini.generate"
+        item for item in client.observations if item["kwargs"]["name"] == "llm.generate"
     ]
     assert generation["kwargs"]["metadata"]["fallback_used"] is True
     assert "prompt privado" not in repr(generation)

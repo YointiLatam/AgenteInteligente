@@ -113,7 +113,13 @@ class GeminiJudge:
         answer: str,
         documents: Sequence[RetrievedDocument],
     ) -> JudgeResult:
-        result = self._generator.generate(_judge_prompt(case, answer, documents))
+        prompt = _judge_prompt(case, answer, documents)
+        generate_for_task = getattr(self._generator, "generate_for_task", None)
+        result = (
+            generate_for_task(prompt, task="judge")
+            if generate_for_task is not None
+            else self._generator.generate(prompt)
+        )
         return parse_judge_result(result)
 
 
@@ -362,14 +368,34 @@ def write_report(report: EvaluationReport, path: Path) -> None:
 
 def _live_configuration(settings: KnowledgeSettings) -> dict[str, object]:
     integrations = get_integrations_settings()
+    generation_model = _configured_text_model(
+        integrations.llm_reasoning_model, integrations.gemini_primary_model
+    )
+    judge_model = _configured_text_model(
+        integrations.llm_judge_model, integrations.gemini_primary_model
+    )
     return {
         "embedding_model": settings.embedding_model,
         "chunk_size": settings.chunk_size,
         "chunk_overlap": settings.chunk_overlap,
         "retrieval_top_k": settings.retrieval_top_k,
-        "generation_model": integrations.gemini_primary_model,
-        "judge_model": integrations.gemini_primary_model,
+        "generation_model": generation_model,
+        "generation_provider": _model_provider(generation_model),
+        "generation_model_used": None,
+        "judge_model": judge_model,
+        "judge_provider": _model_provider(judge_model),
+        "judge_model_used": None,
     }
+
+
+def _configured_text_model(configured: str | None, default: str) -> str:
+    """Devuelve el modelo configurado con su proveedor explícito para el informe."""
+    model = configured or default
+    return model if "/" in model else f"gemini/{model}"
+
+
+def _model_provider(model: str) -> str:
+    return model.partition("/")[0]
 
 
 def main(argv: Sequence[str] | None = None) -> int:

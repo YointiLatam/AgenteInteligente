@@ -140,7 +140,13 @@ def prepare_memory(
     ):
         return updates
     try:
-        result = gemini_client.generate(_summary_prompt(summary, candidates))
+        prompt = _summary_prompt(summary, candidates)
+        generate_for_task = getattr(gemini_client, "generate_for_task", None)
+        result = (
+            generate_for_task(prompt, task="memory")
+            if generate_for_task is not None
+            else gemini_client.generate(prompt)
+        )
         compact_summary = _truncate_to_tokens(result.text.strip(), SUMMARY_TOKEN_BUDGET)
         if not compact_summary:
             raise ValueError("empty_summary")

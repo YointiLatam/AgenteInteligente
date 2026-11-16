@@ -1,4 +1,4 @@
-"""Clasificación de la ruta del flujo mediante Gemini."""
+"""Clasificación de la ruta mediante el generador textual configurado."""
 
 import re
 from typing import Literal
@@ -61,13 +61,18 @@ def router_node(
     if gemini_client is None:
         return {"route": fallback, "fallback_eligible": fallback_eligible}
     try:
-        result = gemini_client.generate(_router_prompt(state))
+        generate_for_task = getattr(gemini_client, "generate_for_task", None)
+        result = (
+            generate_for_task(_router_prompt(state), task="router")
+            if generate_for_task is not None
+            else gemini_client.generate(_router_prompt(state))
+        )
         candidate = result.text.strip().lower()
         route: Route = candidate if candidate in {"rag", "reasoning"} else fallback
         raw_payload = result.raw_payload
     except Exception:
         route = fallback
-        raw_payload = {"provider": "gemini", "error": "classification_unavailable"}
+        raw_payload = {"error": "classification_unavailable"}
     messages = [
         *state.get("messages", []),
         {"role": "router", "content": route, "raw_payload": raw_payload},

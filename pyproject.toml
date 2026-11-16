@@ -2,7 +2,7 @@
 name = "agente-inteligente"
 version = "0.1.0"
 description = "Agente inteligente autónomo: API Gateway y herramientas (Arquitectura 2, LangGraph)"
-requires-python = ">=3.12,<4.0"
+requires-python = ">=3.12,<3.16"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -15,6 +15,7 @@ dependencies = [
     "langgraph-checkpoint-postgres (>=3.2.0,<4.0.0)",
     "cryptography (>=43)",
     "langfuse (>=5,<6)",
+    "litellm (==1.109.1)",
 ]
 
 [dependency-groups]

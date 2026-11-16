@@ -5,7 +5,7 @@ Este repositorio contiene el API Gateway (FastAPI) y las herramientas de integra
 
 ## Requisitos
 
-- Python 3.12+ y [Poetry](https://python-poetry.org/) 2.x
+- Python 3.12 a 3.15 y [Poetry](https://python-poetry.org/) 2.x
 - Docker y Docker Compose
 
 ## Desarrollo local

@@ -34,6 +34,15 @@ class IntegrationsSettings(BaseSettings):
     gemini_fallback_max_attempts: int = Field(default=1, ge=0, le=1)
     gemini_fallback_input_token_limit: int = Field(default=8_000, ge=1)
     gemini_fallback_max_output_tokens: int = Field(default=2_048, ge=1)
+    # LiteLLM usa identificadores ``provider/model`` para los proveedores opcionales.
+    # Si no se configuran, se preserva Gemini como único proveedor textual.
+    openai_api_key: SecretStr | None = None
+    anthropic_api_key: SecretStr | None = None
+    llm_router_model: str | None = None
+    llm_memory_model: str | None = None
+    llm_reasoning_model: str | None = None
+    llm_judge_model: str | None = None
+    llm_fallback_model: str | None = None
 
 
 @lru_cache

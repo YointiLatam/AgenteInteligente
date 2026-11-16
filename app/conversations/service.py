@@ -564,6 +564,24 @@ class ConversationService:
                         "policy_version": output_result.policy_version,
                     },
                 }
+                # La respuesta original y su payload pueden contener material bloqueado.
+                # Solo se conserva la atribución técnica, necesaria para auditoría de uso.
+                source_payload = message.get("raw_payload")
+                if isinstance(source_payload, dict):
+                    model_usage = {
+                        key: source_payload[key]
+                        for key in (
+                            "provider",
+                            "model",
+                            "requested_model",
+                            "used_model",
+                            "fallback_used",
+                            "attempt_count",
+                        )
+                        if isinstance(source_payload.get(key), str | bool | int)
+                    }
+                    if model_usage:
+                        raw_payload["_model_usage"] = model_usage
                 return {
                     **message,
                     "content": output_result.public_message,
