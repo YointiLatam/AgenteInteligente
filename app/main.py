@@ -6,10 +6,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import routes
 from app.core.config import get_settings
+from app.observability.telemetry import get_telemetry
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    get_telemetry()
     app = FastAPI(title=settings.app_name)
     if settings.cors_allowed_origins:
         # Only the configured widget embedders; no wildcard and no cookies/credentials.

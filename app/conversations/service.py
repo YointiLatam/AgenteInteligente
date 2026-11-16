@@ -24,6 +24,7 @@ from app.conversations.repository import (
     ToolExecution,
 )
 from app.integrations.gemini import TextGenerator
+from app.observability.telemetry import get_telemetry
 from app.security.content_guard import (
     ContentGuard,
     DeterministicContentGuard,
@@ -273,15 +274,30 @@ class ConversationService:
         execution: ToolExecution,
         request: ToolDecisionRequest,
     ) -> ToolDecisionResult:
-        try:
-            graph.invoke(None, config)
-        except Exception:
-            return self._recover_resolved_tool_execution(
+        telemetry = get_telemetry()
+        with telemetry.observation(
+            "agent.hitl.approval",
+            metadata={
+                "thread_id": thread.langgraph_thread_id,
+                "turn_id": str(request.turn_id),
+                "tool_name": request.tool_name,
+                "decision": "approved",
+            },
+            trace_seed=f"{thread.langgraph_thread_id}:{request.turn_id}",
+        ) as span:
+            try:
+                graph.invoke(None, config)
+            except Exception:
+                resolved = self._recover_resolved_tool_execution(
+                    graph, config, thread, execution, request.turn_id
+                )
+                telemetry.update(span, {"outcome": "recovered"})
+                return resolved
+            resolved = self._recover_resolved_tool_execution(
                 graph, config, thread, execution, request.turn_id
             )
-        return self._recover_resolved_tool_execution(
-            graph, config, thread, execution, request.turn_id
-        )
+            telemetry.update(span, {"outcome": "success", "tool_status": "executed"})
+            return resolved
 
     def _reject_tool_call(
         self,
@@ -292,26 +308,41 @@ class ConversationService:
         request: ToolDecisionRequest,
         result: dict[str, Any],
     ) -> ToolDecisionResult:
-        try:
-            updated_config = graph.update_state(
-                config,
-                {
-                    "tool_call": None,
-                    "pending_tool_call": None,
-                    "tool_result": result,
-                    "execution_status": "completed",
-                    "completed_turn_id": str(request.turn_id),
-                },
-                as_node="critical_tools",
-            )
-            graph.invoke(None, updated_config)
-        except Exception:
-            return self._recover_resolved_tool_execution(
+        telemetry = get_telemetry()
+        with telemetry.observation(
+            "agent.hitl.rejection",
+            metadata={
+                "thread_id": thread.langgraph_thread_id,
+                "turn_id": str(request.turn_id),
+                "tool_name": request.tool_name,
+                "decision": "rejected",
+            },
+            trace_seed=f"{thread.langgraph_thread_id}:{request.turn_id}",
+        ) as span:
+            try:
+                updated_config = graph.update_state(
+                    config,
+                    {
+                        "tool_call": None,
+                        "pending_tool_call": None,
+                        "tool_result": result,
+                        "execution_status": "completed",
+                        "completed_turn_id": str(request.turn_id),
+                    },
+                    as_node="critical_tools",
+                )
+                graph.invoke(None, updated_config)
+            except Exception:
+                resolved = self._recover_resolved_tool_execution(
+                    graph, config, thread, execution, request.turn_id, result
+                )
+                telemetry.update(span, {"outcome": "recovered"})
+                return resolved
+            resolved = self._recover_resolved_tool_execution(
                 graph, config, thread, execution, request.turn_id, result
             )
-        return self._recover_resolved_tool_execution(
-            graph, config, thread, execution, request.turn_id, result
-        )
+            telemetry.update(span, {"outcome": "rejected", "tool_status": "rejected"})
+            return resolved
 
     def _recover_resolved_tool_execution(
         self,

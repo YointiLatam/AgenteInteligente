@@ -12,6 +12,7 @@ from pydantic import BaseModel, ValidationError
 
 from app.integrations.clients import Provider, ProviderNotConfigured, build_client
 from app.integrations.settings import IntegrationsSettings, get_integrations_settings
+from app.observability.telemetry import get_telemetry
 from app.tools.audit import AuditEntry, AuditSink, NullAuditSink, ToolStatus
 from app.tools.retry import RetryPolicy, SupportsRandom, backoff_delay, parse_rate_limit
 
@@ -123,6 +124,32 @@ class BaseTool(ABC):
             raise ToolError("not_configured", str(exc)) from exc
 
     async def run(
+        self,
+        raw_args: dict,
+        *,
+        thread_id: UUID | None = None,
+        approved: bool = False,
+        approved_by: UUID | None = None,
+    ) -> ToolResult:
+        """Ejecuta con una observación sin argumentos ni resultados sensibles."""
+        telemetry = get_telemetry()
+        with telemetry.observation(
+            "tool.http",
+            as_type="tool",
+            metadata={
+                "tool_name": self.name,
+                "provider": self.provider.value if self.provider else None,
+                "critical": self.critical,
+            },
+        ) as span:
+            result = await self._run(
+                raw_args, thread_id=thread_id, approved=approved, approved_by=approved_by
+            )
+            outcome = "success" if result.status == ToolStatus.EXECUTED else result.status.value
+            telemetry.update(span, {"outcome": outcome, "tool_status": result.status.value})
+            return result
+
+    async def _run(
         self,
         raw_args: dict,
         *,

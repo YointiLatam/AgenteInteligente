@@ -20,10 +20,39 @@ from app.agent.tools import EMPTY_TOOL_REGISTRY, ToolRegistry
 from app.integrations.gemini import GeminiClient, GeminiNotConfigured, TextGenerator
 from app.integrations.settings import get_integrations_settings
 from app.knowledge.retrieval import configured_retriever
+from app.observability.telemetry import get_telemetry
 
 
 class PendingCheckpointError(RuntimeError):
     """Un hilo tiene trabajo pendiente y debe reanudarse antes de otro turno."""
+
+
+def _observed_node(name: str, node):
+    """Wrap a node without exposing state contents to observability."""
+
+    def invoke(state: AgentState):
+        telemetry = get_telemetry()
+        metadata = {
+            "node": name,
+            "route": state.get("route"),
+            "execution_status": state.get("execution_status"),
+            "turn_id": state.get("turn_id"),
+        }
+        with telemetry.observation(f"agent.node.{name}", metadata=metadata) as span:
+            result = node(state)
+            telemetry.update(
+                span,
+                {
+                    "outcome": "success",
+                    "route": result.get("route", state.get("route")),
+                    "execution_status": result.get(
+                        "execution_status", state.get("execution_status")
+                    ),
+                },
+            )
+            return result
+
+    return invoke
 
 
 def _new_turn_input(state: AgentState) -> dict[str, object]:
@@ -62,14 +91,30 @@ def build_agent_graph(
             client = None
     builder = StateGraph(AgentState)
     registry = tool_registry or EMPTY_TOOL_REGISTRY
-    builder.add_node("prepare_memory", partial(prepare_memory, gemini_client=client))
-    builder.add_node("router", partial(router_node, gemini_client=client))
+    builder.add_node(
+        "prepare_memory",
+        _observed_node("prepare_memory", partial(prepare_memory, gemini_client=client)),
+    )
+    builder.add_node("router", _observed_node("router", partial(router_node, gemini_client=client)))
     active_retriever = retriever if retriever is not None else configured_retriever
-    builder.add_node("rag_retrieval", partial(rag_retrieval_node, retriever=active_retriever))
-    builder.add_node("reasoning", partial(reasoning_node, gemini_client=client))
-    builder.add_node("mark_pending_approval", partial(mark_pending_approval, registry=registry))
-    builder.add_node("safe_tools", partial(safe_tools, registry=registry))
-    builder.add_node("critical_tools", partial(critical_tools, registry=registry))
+    builder.add_node(
+        "rag_retrieval",
+        _observed_node("rag_retrieval", partial(rag_retrieval_node, retriever=active_retriever)),
+    )
+    builder.add_node(
+        "reasoning", _observed_node("reasoning", partial(reasoning_node, gemini_client=client))
+    )
+    builder.add_node(
+        "mark_pending_approval",
+        _observed_node("mark_pending_approval", partial(mark_pending_approval, registry=registry)),
+    )
+    builder.add_node(
+        "safe_tools", _observed_node("safe_tools", partial(safe_tools, registry=registry))
+    )
+    builder.add_node(
+        "critical_tools",
+        _observed_node("critical_tools", partial(critical_tools, registry=registry)),
+    )
 
     builder.add_edge(START, "prepare_memory")
     builder.add_edge("prepare_memory", "router")
@@ -125,4 +170,22 @@ def invoke_agent(
             raise PendingCheckpointError(
                 "El hilo tiene trabajo pendiente; debe reanudarse antes de iniciar otro turno"
             )
-    return graph.invoke(_new_turn_input(state), config)
+    telemetry = get_telemetry()
+    trace_seed = (
+        f"{thread_id}:{state.get('turn_id')}" if thread_id and state.get("turn_id") else None
+    )
+    with telemetry.observation(
+        "agent.graph",
+        metadata={"thread_id": thread_id, "turn_id": state.get("turn_id")},
+        trace_seed=trace_seed,
+    ) as span:
+        result = graph.invoke(_new_turn_input(state), config)
+        telemetry.update(
+            span,
+            {
+                "outcome": "success",
+                "route": result.get("route"),
+                "execution_status": result.get("execution_status"),
+            },
+        )
+        return result
