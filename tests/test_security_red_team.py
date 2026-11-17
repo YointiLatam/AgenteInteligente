@@ -483,8 +483,25 @@ class RecordingConnection:
 
 def _retrieval_settings() -> KnowledgeSettings:
     return KnowledgeSettings(
-        database_url="postgresql://safe:secret@localhost/test", retrieval_mode="hybrid"
+        database_url="postgresql://safe:secret@localhost/test",
+        gemini_api_key=None,
+        retrieval_mode="hybrid",
     )
+
+
+class StubEmbedder:
+    """Evita credenciales y llamadas externas al construir recuperadores de prueba."""
+
+    def __init__(self, settings: KnowledgeSettings) -> None:
+        self.model = settings.embedding_model
+
+    def embed_query(self, _: str) -> list[float]:
+        return [0.0]
+
+
+def _hybrid_retriever(monkeypatch: pytest.MonkeyPatch) -> PostgresHybridRetriever:
+    monkeypatch.setattr("app.knowledge.retrieval.GeminiEmbedder", StubEmbedder)
+    return PostgresHybridRetriever(_retrieval_settings())
 
 
 @pytest.mark.parametrize("case_id", ["DB-01", "DB-02"])
@@ -493,8 +510,7 @@ def test_db_queries_keep_malicious_values_as_parameters(monkeypatch, case_id: st
     monkeypatch.setattr(
         "app.knowledge.retrieval.psycopg.connect", lambda _: RecordingConnection(cursor)
     )
-    retriever = PostgresHybridRetriever(_retrieval_settings())
-    retriever._embedder = type("Embedder", (), {"embed_query": lambda _, __: [0.0], "model": "m"})()
+    retriever = _hybrid_retriever(monkeypatch)
     attack = "x'; DROP TABLE knowledge_embeddings; --"
 
     if case_id == "DB-01":
@@ -588,7 +604,7 @@ def test_judge_task_never_uses_reasoning_fallback() -> None:
 
 
 def test_rs_03_retrieval_degrades_when_an_embedding_or_database_branch_fails(monkeypatch) -> None:
-    retriever = PostgresHybridRetriever(_retrieval_settings())
+    retriever = _hybrid_retriever(monkeypatch)
     monkeypatch.setattr(retriever, "_semantic_candidates", lambda _: ([], True))
     monkeypatch.setattr(retriever, "_lexical_candidates", lambda _: ([], True))
 
